@@ -1,0 +1,3 @@
+#include "../runtime_overrides/include/xbox/application_identity.h"
+
+DOGGAME_ICON_ID ICON "DogGame.ico"

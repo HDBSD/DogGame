@@ -1,0 +1,312 @@
+[
+ {
+  "start": "0x000B1607",
+  "observed": true,
+  "note": "PsCreateSystemThreadEx StartContext1 observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000C3F70",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000CB4E0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000D0C10",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000D0C40",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00102460",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x001032C0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x0017A558",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x0017AE53",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000C31D0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000C3550",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000D0FF0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000BFAF0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000E7690",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000677E0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000D6EF0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000DA770",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x0017C3A9",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x0017B955",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00060E90",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00066DB0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000117FB",
+  "observed": true,
+  "note": "Texture conversion cleanup reached by zero-size H001 RWTX assets; shared epilogue restores saved registers and 0x14-byte frame."
+ },
+ {
+  "start": "0x0001180A",
+  "observed": true,
+  "note": "Success continuation of texture conversion, split from 0x117C0 by its shared cleanup entry 0x117FB."
+ },
+ {
+  "start": "0x0003A790",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00054810",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x000647F0",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00066350",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00068520",
+  "observed": true,
+  "note": "Unresolved direct target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00041F0F",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00041E58",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041E8A",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041E96",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041EB3",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041EDB",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041EF5",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041FA1",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041FBF",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041FDD",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00041FFE",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x0004200F",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00042063",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x000420BB",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00042114",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00042132",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x0004214A",
+  "observed": true,
+  "note": "Verified branch target in the game event handler jump tables at 0x42150/0x42188; recover complete handler."
+ },
+ {
+  "start": "0x00042107",
+  "observed": true,
+  "note": "Shared event-handler epilogue reached by recovered jump-table branches; original instructions restore edi, esi, ebp and return."
+ },
+ {
+  "start": "0x00042125",
+  "observed": true,
+  "note": "Shared event-handler epilogue reached by recovered jump-table branches; original instructions restore edi, esi, ebp and return."
+ },
+ {
+  "start": "0x00039D80",
+  "observed": true,
+  "note": "Indirect-call target observed at runtime; decodes as a function body."
+ },
+ {
+  "start": "0x00024BF0",
+  "observed": false,
+  "note": "Original football-helmet charge contact callback selected through EBX by the player collision routine; recovered from XBE 0x24BF0-0x24C84. Persistent body in title_overrides.c."
+ },
+ {
+  "start": "0x000135D0",
+  "observed": true,
+  "note": "S005 entity generator initialization; persistent title override."
+ },
+ {
+  "start": "0x00053960",
+  "observed": true,
+  "note": "S005 boss callback; persistent title override and manual indirect dispatch."
+ },
+ {
+  "start": "0x0004DFD0",
+  "observed": true,
+  "note": "Missing enemy setup callback observed before W028 post-cin7 crash; persistent override and manual dispatch."
+ },
+ {
+  "start": "0x000E9E00",
+  "observed": true,
+  "note": "Missing callback observed before O008 post-FMV crash; persistent override and manual dispatch."
+ },
+ {
+  "start": "0x000EA2C0",
+  "observed": true,
+  "note": "Missing callback observed before O008 post-FMV crash; persistent override and manual dispatch."
+ },
+ {
+  "start": "0x000525B0",
+  "observed": true,
+  "note": "Missing callback observed before O008 post-FMV crash; persistent override and manual dispatch."
+ },
+ {
+  "start": "0x00071E80",
+  "observed": true,
+  "note": "Persistent particle atlas initialization override corrects byte IMUL register width."
+ },
+ {
+  "start": "0x0008CE00",
+  "observed": true,
+  "note": "Native text renderer retained in title_prompts.c; direct-call override substitutes input-dependent keyboard labels."
+ },
+ {
+  "start": "0x00018320",
+  "observed": true,
+  "note": "Persistent debug hook in title_debug_overrides.c; preserve with --exclude-manual."
+ },
+ {
+  "start": "0x0001DCC0",
+  "observed": true,
+  "note": "Persistent debug hook in title_debug_overrides.c; preserve with --exclude-manual."
+ },
+ {
+  "start": "0x0001D970",
+  "observed": true,
+  "note": "Persistent debug hook in title_debug_overrides.c; preserve with --exclude-manual."
+ },
+ {
+  "start": "0x00028CB0",
+  "observed": true,
+  "note": "Persistent debug hook in title_debug_overrides.c; preserve with --exclude-manual."
+ },
+ {
+  "start": "0x0002AD70",
+  "observed": true,
+  "note": "Persistent debug hook in title_debug_overrides.c; preserve with --exclude-manual."
+ }
+]

@@ -1,0 +1,49 @@
+#ifndef NV2A_GPU_H
+#define NV2A_GPU_H
+#include <stdint.h>
+#include "nv2a_combiner.h"
+#ifdef __cplusplus
+extern "C" {
+#endif
+typedef struct {float pos[4], color[4], secondary[4], tex[4], extra[3][4], fog;} NvGpuVertex;
+typedef int (*NvGpuDecode)(void *, unsigned, unsigned, uint32_t *);
+typedef uint64_t (*NvGpuSurfaceOffset)(unsigned, unsigned, unsigned);
+typedef struct {
+    unsigned valid,width,height,addr_u,addr_v,linear;
+    uint64_t key,hash;NvGpuDecode decode;void *arg;
+    const uint8_t *guest;unsigned format,pitch;
+} NvGpuTexture;
+typedef struct {
+    uint8_t *color; float *depth;
+    unsigned width,height,pitch,depth_stride,clip_x,clip_y,clip_w,clip_h;
+    unsigned depth_test,depth_write,depth_func,blend,src,dst,equation,mask;
+    unsigned alpha_test,alpha_func,alpha_ref,mode;
+    float zscale,fog_color[4];
+    Nv2aCombiner combiner;
+    unsigned textured,tw,th,addr_u,addr_v,linear;
+    uint64_t texture_key,texture_hash;
+    NvGpuDecode decode;void *decode_arg;
+    const uint8_t *texture_guest;unsigned texture_format,texture_pitch;
+    NvGpuTexture extra[3];
+    unsigned clip_plane_mode;
+    /* Optional non-linear guest surface layout; offsets are in bytes. */
+    unsigned surface_format;
+    NvGpuSurfaceOffset surface_offset;
+} NvGpuDraw;
+int nv_gpu_enabled(void);
+int nv_gpu_begin(const NvGpuDraw *);
+void nv_gpu_triangle(const NvGpuVertex *);
+void nv_gpu_end(void);
+void nv_gpu_sync(void);
+void nv_gpu_sync_reason(const char *reason);
+void nv_gpu_sync_depth(const char *reason);
+void nv_gpu_prepare_depth_change(const uint8_t *next_color);
+void nv_gpu_discard_overwritten(const uint8_t *color, unsigned pitch, unsigned format, unsigned x, unsigned y, unsigned width, unsigned height, const float *depth);
+const uint32_t *nv_gpu_present_image(const uint8_t *, unsigned, unsigned *, unsigned *);
+void nv_gpu_report(void);
+void nv_gpu_texture_barrier(const uint8_t *, uint64_t);
+void nv_gpu_shutdown(void);
+#ifdef __cplusplus
+}
+#endif
+#endif
