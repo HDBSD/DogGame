@@ -1,0 +1,17 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWindowsForms>true</UseWindowsForms>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <AssemblyName>DogGameSetup</AssemblyName>
+    <ApplicationIcon>../../Resources/DogGame.ico</ApplicationIcon>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Version>0.1.0</Version>
+    <Description>DogGame setup bootstrap</Description>
+  </PropertyGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="../Check-Requirements.ps1" LogicalName="DogGame.Setup.Requirements.ps1" />
+  </ItemGroup>
+</Project>

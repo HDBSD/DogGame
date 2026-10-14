@@ -1,0 +1,6 @@
+{
+  "schemaVersion": 1,
+  "backend": "installed-msvc-development",
+  "portableToolchain": null,
+  "notes": "Bootstrap uses the existing Setup.ps1 pipeline. Portable tool provisioning is not enabled until a compatible toolchain and verified package hashes are pinned."
+}

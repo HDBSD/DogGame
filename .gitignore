@@ -6,6 +6,7 @@ tests/__pycache__/
 !config/seed_functions.json
 out/
 bin/
+obj/
 *.obj
 *.o
 *.lib
