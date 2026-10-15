@@ -228,7 +228,9 @@ static bool init(){
  if(!check(hr,"pixel compile")){release(v);return !(failed=true);}
  bool ok=check(device->CreateVertexShader(v->GetBufferPointer(),v->GetBufferSize(),nullptr,&vs),"vertex shader")&&check(device->CreatePixelShader(p->GetBufferPointer(),p->GetBufferSize(),nullptr,&ps),"pixel shader");
  ID3D11ShaderReflection *general_reflection=nullptr;
- if(SUCCEEDED(D3DReflect(p->GetBufferPointer(),p->GetBufferSize(),__uuidof(ID3D11ShaderReflection),(void**)&general_reflection))){
+ /* MinGW lacks the __uuidof specialization for shader reflection. The SDK
+  * IID names the same interface and also works with the MSVC headers. */
+ if(SUCCEEDED(D3DReflect(p->GetBufferPointer(),p->GetBufferSize(),IID_ID3D11ShaderReflection,(void**)&general_reflection))){
   D3D11_SHADER_DESC stats={};general_reflection->GetDesc(&stats);
   std::fprintf(stderr,"[GPU-SHADER] general instructions=%u temporary-registers=%u\n",stats.InstructionCount,stats.TempRegisterCount);release(general_reflection);
  }
@@ -243,7 +245,7 @@ static bool init(){
   if(errors){std::fprintf(stderr,"[GPU-D3D11] %s\n",(char*)errors->GetBufferPointer());release(errors);}
   if(SUCCEEDED(result) && SUCCEEDED(device->CreatePixelShader(compiled->GetBufferPointer(),compiled->GetBufferSize(),nullptr,&simple_ps[mode]))){
    ID3D11ShaderReflection *reflection=nullptr;
-   if(SUCCEEDED(D3DReflect(compiled->GetBufferPointer(),compiled->GetBufferSize(),__uuidof(ID3D11ShaderReflection),(void**)&reflection))){
+   if(SUCCEEDED(D3DReflect(compiled->GetBufferPointer(),compiled->GetBufferSize(),IID_ID3D11ShaderReflection,(void**)&reflection))){
     D3D11_SHADER_DESC stats={};reflection->GetDesc(&stats);
     std::fprintf(stderr,"[GPU-SHADER] simple mode=%u instructions=%u temporary-registers=%u\n",mode,stats.InstructionCount,stats.TempRegisterCount);release(reflection);
    }

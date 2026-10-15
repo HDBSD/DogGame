@@ -3,7 +3,9 @@ param(
     [string]$GameDirectory,
     [string]$XboxRecompDirectory,
     [switch]$PreviewBuildLocking,
-    [switch]$SkipGeneration
+    [switch]$SkipGeneration,
+    [Parameter(Mandatory = $true)][ValidateNotNullOrEmpty()][string]$ToolchainDirectory,
+    [string]$BuildDirectory
 )
 $ErrorActionPreference = 'Stop'
 
@@ -16,47 +18,18 @@ function Invoke-Checked {
     if ($LASTEXITCODE -ne 0) { throw "$Program failed (exit $LASTEXITCODE)." }
 }
 
-# Resolve tools without installing system software or requiring administrator access.
-$python = (Get-Command python -ErrorAction SilentlyContinue).Source
-
-if (-not $python)
+# Build tools are always taken from this explicit portable directory.
+$tools = (Resolve-Path -LiteralPath $ToolchainDirectory).Path
+$python = Join-Path $tools 'python\python.exe'
+$git = Join-Path $tools 'git\cmd\git.exe'
+$cmake = Join-Path $tools 'cmake\bin\cmake.exe'
+$compiler = (Join-Path $tools 'llvm\bin').Replace('\', '/')
+$env:PATH = "$compiler;$tools\python;$tools\cmake\bin;$tools\ninja;$tools\git\cmd;$env:SystemRoot\System32;$env:SystemRoot"
+foreach ($tool in @($python, $git, $cmake, "$compiler/x86_64-w64-mingw32-clang.exe", "$tools\ninja\ninja.exe"))
 {
-    throw 'Install Python 3.10 or newer and make python available on PATH.' 
+    if (-not (Test-Path -LiteralPath $tool -PathType Leaf)) { throw "Missing portable tool: $tool" }
 }
-
-$git = (Get-Command git -ErrorAction SilentlyContinue).Source
-
-if (-not $git)
-{
-    throw 'Install Git for Windows first.'
-}
-
-$cmake = (Get-Command cmake -ErrorAction SilentlyContinue).Source
-$vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-
-if (-not (Test-Path -LiteralPath $vswhere))
-{
-    throw 'Install Visual Studio with Desktop development with C++ first.'
-}
-
-$vs = & $vswhere -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath
-
-if (-not $vs) 
-{
-    throw 'Visual Studio C++ build tools were not found.'
-}
-
-if (-not $cmake) 
-{
-    $cmake = Join-Path $vs 'Common7\IDE\CommonExtensions\Microsoft\CMake\CMake\bin\cmake.exe'
-}
-
-if (-not (Test-Path -LiteralPath $cmake))
-{
-    throw 'Install CMake 3.20 or newer.'
-
-}
-Invoke-Checked $python @('-c', 'import sys; assert sys.version_info >= (3,10), "Python 3.10+ is required"')
+Invoke-Checked $python @('-c', 'import capstone; print(capstone.__version__)')
 
 if (-not $GameDirectory)
 {
@@ -78,7 +51,7 @@ if ($hash -notin @('E593C49BB9B403ACC7CC4416B83D6130322DF1B70B89E17038FD437044F3
     throw 'This XBE revision is not supported by the current DogGame configuration.'
 }
 
-$build = Join-Path $PSScriptRoot 'build'
+$build = if ($BuildDirectory) { [IO.Path]::GetFullPath($BuildDirectory) } else { Join-Path $PSScriptRoot 'build' }
 $release = Join-Path $build 'Release'
 $exe = Join-Path $release 'DogGame.exe'
 
@@ -105,16 +78,6 @@ if (-not $XboxRecompDirectory)
 
 $XboxRecompDirectory = (Resolve-Path -LiteralPath $XboxRecompDirectory).Path
 
-# Isolated Python environment; generated artifacts remain local to this project.
-$venv = Join-Path $build 'python'
-
-if (-not (Test-Path -LiteralPath (Join-Path $venv 'Scripts\python.exe')))
-{
-    Invoke-Checked $python @('-m', 'venv', $venv)
-}
-
-$python = Join-Path $venv 'Scripts\python.exe'
-Invoke-Checked $python @('-m', 'pip', 'install', 'capstone==5.0.6')
 Invoke-Checked $python @((Join-Path $PSScriptRoot 'scripts\prepare_runtime.py'), '--upstream', $XboxRecompDirectory)
 
 $destination = Join-Path $release 'game'
@@ -161,7 +124,14 @@ else
     'OFF'
 }
 
-Invoke-Checked $cmake @('-S', $PSScriptRoot, '-B', $build, "-DXBOXRECOMP_DIR=$XboxRecompDirectory", "-DPython3_EXECUTABLE=$python", "-DPREVIEW_BUILD_LOCKING=$preview")
+$configure = @('-S', $PSScriptRoot, '-B', $build, "-DXBOXRECOMP_DIR=$XboxRecompDirectory", "-DPython3_EXECUTABLE=$python", "-DPREVIEW_BUILD_LOCKING=$preview")
+$configure += @('-G', 'Ninja', '-DCMAKE_BUILD_TYPE=Release',
+    "-DCMAKE_MAKE_PROGRAM=$($tools.Replace('\', '/'))/ninja/ninja.exe",
+    "-DCMAKE_C_COMPILER=$compiler/x86_64-w64-mingw32-clang.exe",
+    "-DCMAKE_CXX_COMPILER=$compiler/x86_64-w64-mingw32-clang++.exe",
+    "-DCMAKE_RC_COMPILER=$compiler/llvm-windres.exe",
+    "-DCMAKE_RUNTIME_OUTPUT_DIRECTORY=$($release.Replace('\', '/'))")
+
+Invoke-Checked $cmake $configure
 Invoke-Checked $cmake @('--build', $build, '--config', 'Release', '--target', 'DogGame', '--parallel', '4')
 Write-Host "Built $exe"
-Write-Host 'Run .\Run-Menu.ps1 to start the game.'

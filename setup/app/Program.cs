@@ -6,6 +6,21 @@ internal static class Program
     private static void Main(string[] arguments)
     {
         ApplicationConfiguration.Initialize();
+        if (arguments is ["--toolchain-test"])
+        {
+            string result = Path.Combine(AppContext.BaseDirectory, "toolchain-test-result.txt");
+            try
+            {
+                PortableToolchainChecks.RunAsync().GetAwaiter().GetResult();
+                File.WriteAllText(result, "Passed: embedded toolchain extraction and checks with installed development tools excluded from PATH.");
+            }
+            catch (Exception error)
+            {
+                File.WriteAllText(result, error.ToString());
+                Environment.ExitCode = 1;
+            }
+            return;
+        }
         if (arguments is ["--self-test"])
         {
             string result = Path.Combine(AppContext.BaseDirectory, "self-test-result.txt");

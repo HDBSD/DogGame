@@ -8,7 +8,7 @@ internal sealed record RequirementResult(string Name, bool Passed, string Detail
 
 internal static class RequirementChecker
 {
-    internal static async Task<RequirementResult[]> CheckAsync(string scratch, Action<string> output, CancellationToken token)
+    internal static async Task<RequirementResult[]> CheckAsync(string scratch, Action<string> output, CancellationToken token, string tools)
     {
         Directory.CreateDirectory(scratch);
         string script = Path.Combine(scratch, "Check-Requirements.ps1");
@@ -25,11 +25,14 @@ internal static class RequirementChecker
             RedirectStandardOutput = true, RedirectStandardError = true
         };
         foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File", script,
-                                           "-ScratchDirectory", Path.Combine(scratch, "compiler-test") })
+                                           "-ScratchDirectory", Path.Combine(scratch, "compiler-test-" + Guid.NewGuid().ToString("N")) })
         {
             start.ArgumentList.Add(argument);
         }
         using var process = new Process { StartInfo = start };
+        PortableToolchain.Configure(start, tools);
+        start.ArgumentList.Add("-ToolchainDirectory");
+        start.ArgumentList.Add(tools);
         process.Start();
         Task<string> json = process.StandardOutput.ReadToEndAsync();
         Task errors = Task.Run(async () =>

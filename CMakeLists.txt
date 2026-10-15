@@ -111,6 +111,10 @@ endif()
 
 # Link against the xboxrecomp umbrella target (all 6 runtime libraries)
 target_link_libraries(${PROJECT_NAME} PRIVATE xboxrecomp)
+if(MINGW)
+    # Keep the installed game independent of the temporary compiler's C++ DLLs.
+    target_link_options(${PROJECT_NAME} PRIVATE -static)
+endif()
 
 # Include paths for generated recomp headers
 target_include_directories(${PROJECT_NAME} PRIVATE
@@ -126,7 +130,7 @@ target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
     dxguid
-    xinput
+    xinput1_4
     winmm
     # Lets the fault handler resolve the host RIP back to the generated
     # function's symbol, i.e. to the guest function that faulted.

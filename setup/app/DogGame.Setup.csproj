@@ -12,6 +12,8 @@
     <Description>DogGame setup bootstrap</Description>
   </PropertyGroup>
   <ItemGroup>
+    <EmbeddedResource Include="../../build/setup/payload/tools.zip" LogicalName="DogGame.Setup.Tools.zip" Condition="Exists('../../build/setup/payload/tools.zip')" />
+    <EmbeddedResource Include="../../build/setup/payload/tools.sha256" LogicalName="DogGame.Setup.Tools.sha256" Condition="Exists('../../build/setup/payload/tools.sha256')" />
     <EmbeddedResource Include="../Check-Requirements.ps1" LogicalName="DogGame.Setup.Requirements.ps1" />
   </ItemGroup>
 </Project>

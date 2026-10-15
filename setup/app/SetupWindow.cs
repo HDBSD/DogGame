@@ -72,25 +72,16 @@ internal sealed class SetupWindow : Form
         build.Enabled = update.Enabled = requirementsMet;
         if (detectRequirements)
         {
-            status.Text = "Checking build requirements…";
-            Shown += async (_, _) => await RunAsync(async token =>
+            // Portable tools are checked after extraction when a build starts.
+            // Opening the UI must not unpack hundreds of megabytes unnecessarily.
+            requirementsMet = PortableToolchain.IsBundled && Environment.Is64BitOperatingSystem && Environment.Is64BitProcess;
+            build.Enabled = update.Enabled = requirementsMet;
+            status.Text = requirementsMet ? "Portable tools included. Ready to build." : "Publish setup with the portable x64 toolchain first.";
+            if (!requirementsMet)
             {
-                string scratch = Path.Combine(Path.GetTempPath(), "DogGameSetup-requirements-" + Guid.NewGuid().ToString("N"));
-                try
-                {
-                    RequirementResult[] results = await RequirementChecker.CheckAsync(scratch, output.Enqueue, token);
-                    requirementsMet = results.Length > 0 && results.All(result => result.Passed);
-                    status.Text = requirementsMet ? "Requirements met. Ready to build." : "Missing build requirements. See output.";
-                    if (!requirementsMet) ShowOutput(true);
-                }
-                finally
-                {
-                    if (Directory.Exists(scratch))
-                    {
-                        await Task.Run(() => Directory.Delete(scratch, recursive: true));
-                    }
-                }
-            });
+                output.Enqueue(status.Text);
+                ShowOutput(true);
+            }
         }
         build.Click += async (_, _) => await BuildAsync(reuseChoices: false);
         update.Click += async (_, _) => await BuildAsync(reuseChoices: true);

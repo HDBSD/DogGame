@@ -21,4 +21,5 @@ void nv2a_debug_trace_request(void);
 void nv2a_debug_profile_request(void);
 void nv2a_debug_trace_seconds_request(unsigned seconds);
 int xbox_FramebufferFocused(void);
+int xbox_FramebufferKeyDown(int vk);
 #endif

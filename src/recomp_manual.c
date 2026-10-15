@@ -8,6 +8,7 @@
 #include <stdlib.h>
 #include <stddef.h>
 #include <windows.h>
+#include "xbox_memory_layout.h"
 extern void sub_00018320(void);
 extern void sub_0001DCC0(void);
 extern void sub_0001D970(void);
@@ -38,8 +39,8 @@ typedef void (*recomp_func_t)(void);
 
 /* Register state (defined in xbox_memory_layout.c). */
 
-extern __declspec(thread) uint32_t g_eax;
-extern __declspec(thread) uint32_t g_esp;
+extern RECOMP_TLS uint32_t g_eax;
+extern RECOMP_TLS uint32_t g_esp;
 extern ptrdiff_t g_xbox_mem_offset;
 
 extern void sub_000AD9F0(void);

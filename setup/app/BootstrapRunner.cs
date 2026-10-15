@@ -39,8 +39,11 @@ internal sealed class BootstrapRunner
         progress.Report(new(5, "Preparing build environment…"));
         string workspace = Path.Combine(environment, "source");
         await Task.Run(() => PrepareWorkspace(environment, workspace, token), token);
+        string tools = Path.Combine(environment, "tools");
+        progress.Report(new(5, "Extracting portable build tools…", Indeterminate: true));
+        await PortableToolchain.ProvisionAsync(tools, output, token);
         progress.Report(new(6, "Checking build requirements…", Indeterminate: true));
-        RequirementResult[] requirements = await RequirementChecker.CheckAsync(Path.Combine(environment, "requirements"), output, token);
+        RequirementResult[] requirements = await RequirementChecker.CheckAsync(Path.Combine(environment, "requirements"), output, token, tools);
         RequirementResult[] missing = requirements.Where(requirement => !requirement.Passed).ToArray();
         if (requirements.Length == 0 || missing.Length > 0)
         {
@@ -50,9 +53,9 @@ internal sealed class BootstrapRunner
         string logPath = Path.Combine(SetupSettings.Home, "last-build.log");
         string branch = SourceBranch(settings.EnableBetaBuild);
         progress.Report(new(8, $"Downloading DogGame source ({branch})…", Indeterminate: true));
-        await CloneSourceAsync(SourceRepository, branch, workspace, logPath, output, token);
+        await CloneSourceAsync(SourceRepository, branch, workspace, logPath, output, token, tools);
         progress.Report(new(10, "Building DogGame…", Indeterminate: true));
-        await RunBuildAsync(workspace, game, logPath, output, token);
+        await RunBuildAsync(workspace, game, logPath, output, token, tools);
 
         string release = Path.Combine(workspace, "build", "Release");
         if (!File.Exists(Path.Combine(release, "DogGame.exe")))
@@ -138,7 +141,7 @@ internal sealed class BootstrapRunner
     }
 
     internal static async Task CloneSourceAsync(string repository, string branch, string workspace,
-                                                string logPath, Action<string> output, CancellationToken token)
+                                                string logPath, Action<string> output, CancellationToken token, string tools)
     {
         var start = new ProcessStartInfo
         {
@@ -150,6 +153,8 @@ internal sealed class BootstrapRunner
         // otherwise leave a private-repository download waiting indefinitely.
         start.Environment["GIT_TERMINAL_PROMPT"] = "0";
         start.Environment["GCM_INTERACTIVE"] = "never";
+        start.FileName = Path.Combine(tools, "git", "cmd", "git.exe");
+        PortableToolchain.Configure(start, tools);
         foreach (string argument in new[] { "clone", "--depth", "1", "--single-branch", "--branch", branch,
                                            "--progress", "--", repository, workspace })
         {
@@ -175,7 +180,7 @@ internal sealed class BootstrapRunner
     }
 
     private static async Task RunBuildAsync(string workspace, string game, string logPath,
-                                            Action<string> output, CancellationToken token)
+                                            Action<string> output, CancellationToken token, string tools)
     {
         var start = new ProcessStartInfo
         {
@@ -187,11 +192,14 @@ internal sealed class BootstrapRunner
             RedirectStandardError = true
         };
         start.Environment["PIP_CACHE_DIR"] = Path.Combine(workspace, "build", "pip-cache");
+        PortableToolchain.Configure(start, tools);
         foreach (string argument in new[] { "-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-File",
                                            Path.Combine(workspace, "Setup.ps1"), "-GameDirectory", game })
         {
             start.ArgumentList.Add(argument);
         }
+        start.ArgumentList.Add("-ToolchainDirectory");
+        start.ArgumentList.Add(tools);
         await BuildProcess.RunAsync(start, logPath, output, token, appendLog: true);
     }
 
