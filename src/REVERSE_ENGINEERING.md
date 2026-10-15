@@ -41,4 +41,25 @@ New policy belongs in an intent-based helper. A small guest entry point routes t
 
 ## Validation limits
 
+On 15 October 2026, the portable Clang build failed during device initialization.
+Both supplied `DogGame-crash-20261015-0130*.dmp` files stopped in host code for
+`sub_0017ACD8`, at instruction bytes `23 14 08` (`AND edx, [rax+rcx]`). The native
+fault address was `FED10034`; subtracting the recorded guest mapping offset
+`10000` identifies OHCI0 register `FED00034`. The shared MMIO decoder understood
+memory-destination AND but not this register-destination read.
+
+After supporting that instruction, a local startup run reached the APU and
+faulted in `sub_0013E507` on `F7 84 06 F0 1F FE FF 18 00 00 00`
+(`TEST dword [rsi+rax-1E010], 18`) at guest register `FE802000`. The APU's legacy
+decoder now delegates unsupported forms to the shared decoder, which handles
+this immediate TEST. Device callbacks remain responsible for access semantics;
+the decoder updates host registers/flags and advances the native instruction.
+
+`tests/mmio_and_test.c` covers both instruction byte sequences, one read/no
+writes, register widths, logical flags, extended registers, SIB displacement
+lengths and rejection of unsupported register-only forms. A rebuilt portable
+executable ran for 20 seconds into logo video playback and D3D11 rendering
+without either MMIO fault, then the owned test process was closed. This is a
+startup smoke test, not validation of a complete playthrough.
+
 Synthetic tests can verify layout handling, preserved state, call order, press-edge changes, and copied geometry. Syntax checks verify that the source compiles against the available headers. Neither substitutes for a full link and a gameplay run of the supported XBE. Record those separately when performed.
