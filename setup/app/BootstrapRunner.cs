@@ -23,7 +23,7 @@ internal sealed class BootstrapRunner
                                  Action<string> output, CancellationToken token)
     {
         string game = Path.GetFullPath(settings.GameDirectory ?? throw new InvalidOperationException("Select a game folder."));
-        string installation = Path.GetFullPath(settings.InstallDirectory ?? throw new InvalidOperationException("Select an installation folder."));
+        string installation = SetupInstallation.Current.DirectoryPath;
         string environment = Path.GetFullPath(SetupSettings.EnvironmentDirectory);
         ValidateInstallation(game, installation, environment);
         progress.Report(new(0, "Checking game files…"));
@@ -113,12 +113,23 @@ internal sealed class BootstrapRunner
         }
     }
 
-    private static void PrepareWorkspace(string environment, string workspace, CancellationToken token)
+    internal static void PrepareWorkspace(string environment, string workspace, CancellationToken token)
     {
         if (Directory.Exists(environment))
         {
             RequireMarker(environment, EnvironmentMarker);
-            RejectLinks(environment);
+            RejectLink(environment);
+            string checkout = Path.GetFullPath(Path.Combine(environment, "source"));
+            foreach (string entry in Directory.EnumerateFileSystemEntries(environment))
+            {
+                RejectLink(entry);
+                if (Directory.Exists(entry) && !Path.GetFullPath(entry).Equals(checkout, StringComparison.OrdinalIgnoreCase))
+                {
+                    // Only the checkout is about to be deleted without following
+                    // links. Cached tools still require the original strict check.
+                    RejectLinks(entry);
+                }
+            }
         }
         else
         {
@@ -127,7 +138,8 @@ internal sealed class BootstrapRunner
         }
         token.ThrowIfCancellationRequested();
         // Always start from a fresh checkout, including when switching branches.
-        // The marker and link checks above establish ownership of this tree.
+        // The marker and root check establish ownership. Dependency archives may
+        // contain links; cleanup unlinks those entries without following them.
         string expected = Path.GetFullPath(Path.Combine(environment, "source"));
         if (!Path.GetFullPath(workspace).Equals(expected, StringComparison.OrdinalIgnoreCase))
         {
@@ -135,8 +147,7 @@ internal sealed class BootstrapRunner
         }
         if (Directory.Exists(workspace))
         {
-            ClearReadOnlyFiles(workspace);
-            Directory.Delete(workspace, recursive: true);
+            DeleteOwnedTree(workspace, token);
         }
     }
 
@@ -306,11 +317,77 @@ internal sealed class BootstrapRunner
         {
             return;
         }
+        RejectLink(environment);
         RequireMarker(environment, EnvironmentMarker);
-        RejectLinks(environment);
+        DeleteOwnedTree(environment, token, EnvironmentMarker);
+    }
+
+    // Only call after verifying the owned root and expected path. Never recurse
+    // through a reparse point or clear attributes on its target. SDL's release
+    // archive includes Android source links even in a Windows-only build.
+    private static void DeleteOwnedTree(string directory, CancellationToken token, string? marker = null)
+    {
+        RejectLink(directory);
+        foreach (string entry in Directory.EnumerateFileSystemEntries(directory))
+        {
+            token.ThrowIfCancellationRequested();
+            // Retain ownership if cancellation or an I/O failure interrupts cleanup.
+            if (marker != null && Path.GetFileName(entry).Equals(marker, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+            FileAttributes attributes = File.GetAttributes(entry);
+            if ((attributes & FileAttributes.ReparsePoint) != 0)
+            {
+                if ((attributes & FileAttributes.Directory) != 0)
+                {
+                    Directory.Delete(entry, recursive: false);
+                }
+                else
+                {
+                    File.Delete(entry);
+                }
+            }
+            else if ((attributes & FileAttributes.Directory) != 0)
+            {
+                DeleteOwnedTree(entry, token);
+            }
+            else
+            {
+                if ((attributes & FileAttributes.ReadOnly) != 0)
+                {
+                    File.SetAttributes(entry, attributes & ~FileAttributes.ReadOnly);
+                }
+                File.Delete(entry);
+            }
+        }
         token.ThrowIfCancellationRequested();
-        ClearReadOnlyFiles(environment);
-        Directory.Delete(environment, recursive: true);
+        FileAttributes rootAttributes = File.GetAttributes(directory);
+        File.SetAttributes(directory, rootAttributes & ~FileAttributes.ReadOnly);
+        if (marker != null)
+        {
+            string markerPath = Path.Combine(directory, marker);
+            File.SetAttributes(markerPath, File.GetAttributes(markerPath) & ~FileAttributes.ReadOnly);
+            File.Delete(markerPath);
+            try
+            {
+                // No cancellation between removing the marker and the empty root.
+                Directory.Delete(directory, recursive: false);
+            }
+            catch
+            {
+                if (Directory.Exists(directory))
+                {
+                    RejectLink(directory);
+                    File.WriteAllText(markerPath, MarkerContents);
+                }
+                throw;
+            }
+        }
+        else
+        {
+            Directory.Delete(directory, recursive: false);
+        }
     }
 
     private static void ClearReadOnlyFiles(string directory)
@@ -329,6 +406,10 @@ internal sealed class BootstrapRunner
     private static void RequireMarker(string directory, string marker)
     {
         string path = Path.Combine(directory, marker);
+        if (File.Exists(path))
+        {
+            RejectLink(path);
+        }
         if (!File.Exists(path) || File.ReadAllText(path) != MarkerContents)
         {
             throw new InvalidOperationException("Choose an empty installation folder, or a folder already managed by DogGame Setup.");

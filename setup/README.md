@@ -4,15 +4,17 @@ DogGameSetup.exe is a self-contained Windows x64 application. It embeds Python w
 
 ## Build and update
 
-- **Build** selects the extracted Xbox game folder containing the supported `default.xbe`, and a dedicated installation directory.
-- **Update** downloads fresh source using saved game and installation folders.
+- **Build** selects the extracted Xbox game folder containing the supported `default.xbe`. The built game is installed into `DogGame-Contents` beside `DogGameSetup.exe`. There is no installation-folder picker.
+- **Update** downloads fresh source using the saved Xbox game folder and updates the adjacent `DogGame-Contents` installation.
+- **Play** launches `DogGame-Contents/DogGame.exe` with that folder as its working directory, so game assets resolve correctly. It is enabled when the executable exists, independently of build-tool availability.
+- **Open game folder** opens the contents folder in Windows Explorer when that folder exists.
 - **Enable beta build** selects `beta`; otherwise setup clones `master` from `https://github.com/HDBSD/DogGame.git`. Missing branches fail without fallback. This choice does not enable preview authentication locking.
 - **Remove build environment after build** is enabled by default. Following successful installation, setup removes its source checkout, tools, generated code and build files. Explicitly disabling this retains the environment; the next build replaces the source checkout.
 - **Remove environment** deletes only the marked environment, preserving the user's game, installation, settings and last build log. Failed/cancelled builds retain files for diagnosis.
 
 Work runs under `%LOCALAPPDATA%\DogGameSetup\environment`. Setup verifies the embedded tool archive's SHA-256, extracts it, checks Python/Capstone and Git, and compiles/links a C/C++/resource fixture using its own CMake, Ninja and compiler. It then generates and builds the game on the user's device. Embedded Python uses bundled packages rather than pip or a virtual environment. Tool locations are explicitly passed to Setup.ps1; system-wide PATH is not modified.
 
-The installation is staged beside the destination and the prior installation is restored if publishing fails. Existing `.ini`/`.json` settings are retained. Source game, installation and environment cannot overlap. Setup never starts or stops a game. The resulting executable links the compiler's C++ runtime statically so removing the tools does not remove runtime DLLs it needs. Windows graphics, audio and Media Foundation components remain OS dependencies.
+The installation is staged beside the destination and the prior installation is restored if publishing fails. Existing `.ini`/`.json` settings are retained. Source game, installation and environment cannot overlap. Setup starts the game only when Play is clicked and never stops a running game. The resulting executable links the compiler's C++ runtime statically so removing the tools does not remove runtime DLLs it needs. Windows graphics, audio and Media Foundation components remain OS dependencies.
 
 ## Output and cancellation
 
@@ -43,3 +45,7 @@ Use a fresh build directory when changing compilers (`-BuildDirectory 'path\to\b
 Compiler success does not establish gameplay correctness. The LLVM-MinGW executable still needs gameplay testing, including rendering, audio, input, saves and guest thread/register behavior.
 
 The game build also downloads a hash-pinned SDL controller source release and links it statically for Xbox, PS4 and PS5 input. Users do not install SDL or a controller remapper. The output includes `SDL-LICENSE.txt`; see [controller support](../CONTROLLERS.md) for mappings and validation limits.
+
+Dependency archives can contain source symlinks for other platforms (including SDL's Android manifests). Environment cleanup removes link entries without following their targets. The marked environment root and checkout root must be real directories; copying links into the installed game remains rejected. Cleanup retains its ownership marker until the final removal so interruption can be retried. The self-test includes file/directory links, dangling links, a cycle and unchanged read-only targets; creating these test links requires Windows Developer Mode or symbolic-link privileges.
+
+Keep `DogGameSetup.exe` in its own folder. Setup displays a non-blocking warning when its directory contains anything other than that executable and `DogGame-Contents`; unrelated files are not modified. The installation location is shown in the window. Moving setup together with its contents folder preserves the launcher layout. Old saved custom installation paths are ignored; existing installations in other locations are not moved automatically. Building/updating replaces only the adjacent installation under the existing managed-folder checks.

@@ -5,7 +5,6 @@ namespace DogGame.Setup;
 internal sealed record SetupSettings
 {
     public string? GameDirectory { get; init; }
-    public string? InstallDirectory { get; init; }
     public bool RemoveEnvironmentAfterBuild { get; init; } = true;
     public int CleanupDefaultVersion { get; init; } = 1;
     public bool EnableBetaBuild { get; init; }

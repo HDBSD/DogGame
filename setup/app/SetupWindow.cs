@@ -1,3 +1,5 @@
+using System.Diagnostics;
+
 namespace DogGame.Setup;
 
 internal sealed class SetupWindow : Form
@@ -10,6 +12,17 @@ internal sealed class SetupWindow : Form
     private readonly Button update = new() { Text = "Update" };
     private readonly Button remove = new() { Text = "Remove environment" };
     private readonly Button cancel = new() { Text = "Cancel", Enabled = false };
+    private readonly Button play = new() { Text = "Play", Enabled = false };
+    private readonly Button openFolder = new() { Text = "Open game folder", Enabled = false };
+    private readonly Label installLocation = new() { AutoEllipsis = true };
+    private readonly Label locationWarning = new()
+    {
+        BackColor = Color.LightGoldenrodYellow,
+        ForeColor = Color.FromArgb(92, 61, 0),
+        Padding = new Padding(8, 4, 8, 4),
+        Visible = false
+    };
+    private readonly SetupInstallation installation;
     private readonly Button toggleOutput = new() { Text = "Show output" };
     private readonly BuildOutputPanel output = new() { Visible = false };
     private readonly BootstrapRunner runner = new();
@@ -18,10 +31,11 @@ internal sealed class SetupWindow : Form
     private bool closeWhenFinished;
     private bool requirementsMet;
 
-    public SetupWindow(bool detectRequirements = true)
+    public SetupWindow(bool detectRequirements = true, SetupInstallation? installation = null)
     {
+        this.installation = installation ?? SetupInstallation.Current;
         Text = "DogGame Setup Tool";
-        ClientSize = new Size(650, 660);
+        ClientSize = new Size(650, 712);
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
@@ -34,8 +48,13 @@ internal sealed class SetupWindow : Form
             Text = "DogGame PC port — work in progress", Font = new Font("Segoe UI", 11, FontStyle.Bold)
         };
         heading.SetBounds(18, 18, 614, 26);
-        var information = new Label
+        var information = new TextBox
         {
+            ReadOnly = true,
+            Multiline = true,
+            ScrollBars = ScrollBars.Vertical,
+            BorderStyle = BorderStyle.None,
+            TabStop = false,
             BackColor = SystemColors.Control,
             Text = "This is an ongoing project. The recompilation may be playable, but it is not perfect.\r\n\r\n" +
                    "DogGame uses xboxrecomp. Both projects have used AI for log review, documentation, code review, code documentation, refactoring and code generation.\r\n\r\n" +
@@ -43,19 +62,25 @@ internal sealed class SetupWindow : Form
                    "The goal is a fully playable PC port of the dog game. Version 1.0.0 targets a fully playable experience with minor enhancements.\r\n\r\n" +
                    "For 1.0, reproducing original glitches or unintended behavior is not a target. If they are replicated, we do not plan to patch them."
         };
-        information.SetBounds(18, 51, 614, 420);
-        removeAfterBuild.SetBounds(18, 487, 600, 24);
-        betaBuild.SetBounds(18, 516, 600, 24);
-        progress.SetBounds(18, 553, 614, 22);
-        status.SetBounds(18, 580, 614, 20);
-        build.SetBounds(18, 615, 90, 28);
-        update.SetBounds(116, 615, 90, 28);
-        remove.SetBounds(214, 615, 190, 28);
-        cancel.SetBounds(412, 615, 90, 28);
-        toggleOutput.SetBounds(510, 615, 122, 28);
-        output.SetBounds(650, 0, 500, 660);
+        information.SetBounds(18, 51, 614, 330);
+        installLocation.Text = "Game folder: DogGame-Contents (beside this setup executable)";
+        installLocation.AccessibleDescription = this.installation.DirectoryPath;
+        installLocation.SetBounds(18, 397, 614, 34);
+        locationWarning.SetBounds(18, 438, 614, 48);
+        removeAfterBuild.SetBounds(18, 500, 600, 24);
+        betaBuild.SetBounds(18, 529, 600, 24);
+        progress.SetBounds(18, 566, 614, 22);
+        status.SetBounds(18, 593, 614, 20);
+        build.SetBounds(18, 628, 90, 28);
+        update.SetBounds(116, 628, 90, 28);
+        remove.SetBounds(214, 628, 190, 28);
+        cancel.SetBounds(412, 628, 90, 28);
+        toggleOutput.SetBounds(510, 628, 122, 28);
+        play.SetBounds(18, 666, 90, 28);
+        openFolder.SetBounds(116, 666, 190, 28);
+        output.SetBounds(650, 0, 500, 712);
         Controls.AddRange([heading, information, removeAfterBuild, betaBuild, progress, status,
-                          build, update, remove, cancel, toggleOutput, output]);
+                          build, update, remove, cancel, toggleOutput, play, openFolder, installLocation, locationWarning, output]);
         AcceptButton = build;
 
         try
@@ -83,6 +108,10 @@ internal sealed class SetupWindow : Form
                 ShowOutput(true);
             }
         }
+        RefreshInstallation();
+        Activated += (_, _) => RefreshInstallation();
+        play.Click += (_, _) => Launch(playGame: true);
+        openFolder.Click += (_, _) => Launch(playGame: false);
         build.Click += async (_, _) => await BuildAsync(reuseChoices: false);
         update.Click += async (_, _) => await BuildAsync(reuseChoices: true);
         cancel.Click += (_, _) => CancelOperation();
@@ -107,7 +136,6 @@ internal sealed class SetupWindow : Form
     private async Task BuildAsync(bool reuseChoices)
     {
         string? game = reuseChoices ? settings.GameDirectory : null;
-        string? destination = settings.InstallDirectory;
         if (game == null || !Directory.Exists(game))
         {
             game = SelectFolder("Select the extracted Xbox game folder containing default.xbe", settings.GameDirectory);
@@ -116,18 +144,9 @@ internal sealed class SetupWindow : Form
                 return;
             }
         }
-        if (!reuseChoices || destination == null)
-        {
-            destination = SelectFolder("Select a dedicated folder for DogGame", destination);
-            if (destination == null)
-            {
-                return;
-            }
-        }
         settings = new SetupSettings
         {
             GameDirectory = game,
-            InstallDirectory = destination,
             RemoveEnvironmentAfterBuild = removeAfterBuild.Checked,
             EnableBetaBuild = betaBuild.Checked
         };
@@ -157,7 +176,7 @@ internal sealed class SetupWindow : Form
         }
         operation = new CancellationTokenSource();
         cancel.Enabled = true;
-        foreach (Control control in new Control[] { build, update, remove, removeAfterBuild, betaBuild })
+        foreach (Control control in new Control[] { build, update, remove, play, openFolder, removeAfterBuild, betaBuild })
         {
             control.Enabled = false;
         }
@@ -185,16 +204,54 @@ internal sealed class SetupWindow : Form
             cancel.Enabled = false;
             output.Flush();
             progress.Style = ProgressBarStyle.Continuous;
-            foreach (Control control in new Control[] { build, update, remove, removeAfterBuild, betaBuild })
+            foreach (Control control in new Control[] { build, update, remove, play, openFolder, removeAfterBuild, betaBuild })
             {
                 control.Enabled = true;
             }
-            build.Enabled = update.Enabled = requirementsMet;
+            RefreshInstallation();
             if (closeWhenFinished)
             {
                 Close();
             }
         }
+    }
+
+    internal void RefreshInstallation()
+    {
+        bool idle = operation == null;
+        build.Enabled = idle && requirementsMet;
+        update.Enabled = idle && requirementsMet && installation.IsInstalled;
+        play.Enabled = idle && installation.IsInstalled;
+        openFolder.Enabled = idle && installation.FolderExists;
+        try
+        {
+            locationWarning.Visible = installation.HasOtherEntries();
+            locationWarning.Text = "This folder contains other files. Please use a dedicated setup folder.";
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            locationWarning.Visible = true;
+            locationWarning.Text = "Setup could not check this folder. We recommend keeping setup in its own folder.";
+        }
+    }
+
+    private void Launch(bool playGame)
+    {
+        if (operation != null)
+        {
+            return;
+        }
+        try
+        {
+            ProcessStartInfo request = playGame ? installation.PlayRequest() : installation.OpenFolderRequest();
+            using Process? process = Process.Start(request);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or
+                                      System.ComponentModel.Win32Exception or InvalidOperationException)
+        {
+            MessageBox.Show(this, error.Message, "DogGame Setup Tool", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        RefreshInstallation();
     }
 
     private void CancelOperation()
@@ -210,7 +267,7 @@ internal sealed class SetupWindow : Form
 
     internal void ShowOutput(bool visible)
     {
-        ClientSize = new Size(visible ? 1150 : 650, 660);
+        ClientSize = new Size(visible ? 1150 : 650, 712);
         output.Visible = visible;
         toggleOutput.Text = visible ? "Hide output" : "Show output";
         if (Right > Screen.FromControl(this).WorkingArea.Right)
