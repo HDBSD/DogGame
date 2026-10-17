@@ -126,11 +126,17 @@ target_include_directories(${PROJECT_NAME} PRIVATE
 )
 
 # Windows SDK libraries needed at link time
+if(MINGW)
+    set(DOGGAME_XINPUT_LIBRARY xinput1_4)
+else()
+    # The Microsoft SDK names its modern XInput import library xinput.lib.
+    set(DOGGAME_XINPUT_LIBRARY xinput)
+endif()
 target_link_libraries(${PROJECT_NAME} PRIVATE
     d3d11
     dxgi
     dxguid
-    xinput1_4
+    ${DOGGAME_XINPUT_LIBRARY}
     winmm
     # Lets the fault handler resolve the host RIP back to the generated
     # function's symbol, i.e. to the guest function that faulted.

@@ -62,4 +62,12 @@ executable ran for 20 seconds into logo video playback and D3D11 rendering
 without either MMIO fault, then the owned test process was closed. This is a
 startup smoke test, not validation of a complete playthrough.
 
+The same fixes were validated with MSVC 19.51.36257 on 15 October 2026:
+the full x64 Release executable linked, the MMIO regression executable passed,
+and a 20-second startup run reached D3D11 rendering and logo video playback.
+The Microsoft SDK uses `xinput.lib` for `XINPUT1_4.dll`, whereas MinGW needs
+`xinput1_4`; the build selects that name per toolchain. Both compiler builds
+were relinked after this adjustment. Generated-code shift warnings remain;
+startup success does not establish correctness of every generated routine.
+
 Synthetic tests can verify layout handling, preserved state, call order, press-edge changes, and copied geometry. Syntax checks verify that the source compiles against the available headers. Neither substitutes for a full link and a gameplay run of the supported XBE. Record those separately when performed.
