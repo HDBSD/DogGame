@@ -41,3 +41,5 @@ Use a fresh build directory when changing compilers (`-BuildDirectory 'path\to\b
 `DogGameSetup.exe --toolchain-test` extracts the actual embedded tools beside the test executable and checks them with installed development tools excluded from PATH. It retains the extracted test tools for a full development build. Results are written beside the executable.
 
 Compiler success does not establish gameplay correctness. The LLVM-MinGW executable still needs gameplay testing, including rendering, audio, input, saves and guest thread/register behavior.
+
+The game build also downloads a hash-pinned SDL controller source release and links it statically for Xbox, PS4 and PS5 input. Users do not install SDL or a controller remapper. The output includes `SDL-LICENSE.txt`; see [controller support](../CONTROLLERS.md) for mappings and validation limits.

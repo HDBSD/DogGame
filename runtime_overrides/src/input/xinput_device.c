@@ -6,7 +6,7 @@
  * (analog buttons as bytes, separate trigger channels) and the host
  * (digital face buttons, trigger axes).
  *
- *   _WIN32 -> Windows XInput
+ *   _WIN32 -> SDL gamepads normalized to XInput (native XInput on SDL failure)
  *   POSIX  -> SDL2 GameController
  */
 
@@ -22,6 +22,7 @@
 /* ======================================================================== */
 
 #include <xinput.h>
+#include "host_gamepad.h"
 #pragma comment(lib, "xinput.lib")
 
 static BOOL  g_controller_connected[XBOX_MAX_CONTROLLERS] = { FALSE };
@@ -137,7 +138,7 @@ void xbox_InputInit(void)
 {
     for (DWORD i = 0; i < XBOX_MAX_CONTROLLERS; i++) {
         XINPUT_STATE state;
-        DWORD result = XInputGetState(i, &state);
+        DWORD result = host_gamepad_get_state(i, &state);
         g_controller_connected[i] = (result == ERROR_SUCCESS);
     }
 }
@@ -151,9 +152,12 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pState)
         return ERROR_DEVICE_NOT_CONNECTED;
 
+    memset(pState, 0, sizeof(*pState));
+
     /* Poll physical input before overlay/startup early returns, independently
      * of the merged/synthetic guest state used for gameplay. */
-    result = XInputGetState(dwPort, &xi_state);
+    result = host_gamepad_get_state(dwPort, &xi_state);
+    g_controller_connected[dwPort] = result == ERROR_SUCCESS;
     if(dwPort==0) {
         XINPUT_GAMEPAD idle={0};
         input_method_pad(result==ERROR_SUCCESS?&xi_state.Gamepad:&idle);
@@ -246,7 +250,7 @@ DWORD xbox_InputSetState(DWORD dwPort, const XBOX_VIBRATION *pVibration)
 
     xi_vib.wLeftMotorSpeed = pVibration->wLeftMotorSpeed;
     xi_vib.wRightMotorSpeed = pVibration->wRightMotorSpeed;
-    return XInputSetState(dwPort, &xi_vib);
+    return host_gamepad_set_state(dwPort, &xi_vib);
 }
 
 BOOL xbox_InputIsConnected(DWORD dwPort)
@@ -263,7 +267,7 @@ DWORD xbox_InputGetCapabilities(DWORD dwPort, DWORD dwFlags, XBOX_INPUT_CAPABILI
     if (dwPort >= XBOX_MAX_CONTROLLERS || !pCaps)
         return ERROR_DEVICE_NOT_CONNECTED;
 
-    result = XInputGetCapabilities(dwPort, dwFlags, &xi_caps);
+    result = host_gamepad_get_capabilities(dwPort, dwFlags, &xi_caps);
     if (result != ERROR_SUCCESS) return result;
 
     memset(pCaps, 0, sizeof(XBOX_INPUT_CAPABILITIES));

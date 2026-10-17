@@ -10,12 +10,17 @@ prefix=r'''
 #include <windows.h>
 #include <xinput.h>
 #include <stdio.h>
+#include <string.h>
 static unsigned serial;
 static unsigned char keys[256];
 static XINPUT_STATE physical;
 static int connected=1,captured;
 static DWORD fake_get_state(DWORD p,XINPUT_STATE *s){(void)p;*s=physical;return connected?ERROR_SUCCESS:ERROR_DEVICE_NOT_CONNECTED;}
-#define XInputGetState fake_get_state
+static DWORD fake_set_state(DWORD p,const XINPUT_VIBRATION *v){(void)p;(void)v;return ERROR_SUCCESS;}
+static DWORD fake_caps(DWORD p,DWORD f,XINPUT_CAPABILITIES *c){(void)p;(void)f;memset(c,0,sizeof(*c));return ERROR_SUCCESS;}
+#define host_gamepad_get_state fake_get_state
+#define host_gamepad_set_state fake_set_state
+#define host_gamepad_get_capabilities fake_caps
 unsigned xbox_FramebufferKeyboardSerial(void){return serial;}
 int xbox_FramebufferKeyDown(int k){return keys[k];}
 int xbox_DebugOverlayCaptured(void){return captured;}

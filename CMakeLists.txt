@@ -103,6 +103,10 @@ add_executable(${PROJECT_NAME} WIN32
     ${RECOMP_GEN_SOURCES}
 )
 set_target_properties(${PROJECT_NAME} PROPERTIES OUTPUT_NAME DogGame)
+add_custom_command(TARGET ${PROJECT_NAME} POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        "${CMAKE_CURRENT_SOURCE_DIR}/Resources/SDL-LICENSE.txt"
+        "$<TARGET_FILE_DIR:${PROJECT_NAME}>/SDL-LICENSE.txt")
 if(PREVIEW_BUILD_LOCKING)
     target_sources(${PROJECT_NAME} PRIVATE src/preview_auth.c src/api/preview_auth_identity.c)
     target_compile_definitions(${PROJECT_NAME} PRIVATE PREVIEW_BUILD_LOCKING=1)
