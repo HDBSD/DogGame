@@ -162,3 +162,11 @@ mixing. Clipping alone does not prove memory corruption.
 
 
 Recomp Settings includes **30 FPS cap** (OFF by default). ON limits guest frame presentation to 30 FPS without changing the refresh clock or simulation timestep. It cannot raise low FPS. The setting persists as `FpsCap30` in `display.ini`.
+
+### Renderer comparison switches
+
+Set `RECOMP_GPU_INDEXED_UPLOAD=0` before launching to compare the direct triangle upload path against the default batch-local indexed path. `[GPU-GEOMETRY-TRANSFER]` reports the expanded-equivalent vertex payload, actual vertex/index upload bytes, indexed draw count and reused vertex references. These are cumulative counters; uploads and timing alone do not establish an FPS improvement.
+
+`RECOMP_GPU_STATE_CACHE=0` disables redundant binding/constant-upload avoidance. `[GPU-SUBMISSION]` reports the corresponding issued/skipped operations. These environment switches are renderer diagnostics, independent of the user-facing graphics settings. They are read once per process.
+
+`RECOMP_GPU_RESIDENT_SURFACES=0` disables the retained surface-content path for comparison, using dimension-based allocation reuse and the legacy rendered-texture snapshot cache. The default retains GPU attachment contents, validates CPU edits before skipping uploads, binds compatible inactive targets directly as textures, and reproduces uniform contents with attachment clears. `[GPU-RESIDENT-SURFACES]` reports per-attachment reuse hits, direct texture bindings, upload replacements using clears, actual upload payload and inactive pair count. Existing readback boundaries remain enabled in both modes. Inactive resource payload is bounded to eight pairs and 128 MiB, excluding the active pair and CPU validation storage.

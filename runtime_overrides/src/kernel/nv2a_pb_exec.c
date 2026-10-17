@@ -722,15 +722,20 @@ static void raster_triangle(const float a[2], const float b[2],
                             const float c[2], uint32_t argb,
                             const float uv[3][2]);
 
-static void clear_surface(uint32_t param)
+static void clear_surface(uint32_t param, int gpu_clear)
 {
-    nv_gpu_sync_reason("CPU color clear");
+    if (!(param & NV097_CLEAR_COLOR_MASK))
+    {
+        return;
+    }
+    if (!gpu_clear)
+    {
+        nv_gpu_sync_reason("CPU color clear");
+    }
     uint8_t *mem = (uint8_t *)xbox_GetMemoryOffset();
     uint32_t bpp = surface_bpp();
     uint32_t y, x;
 
-    if (!(param & NV097_CLEAR_COLOR_MASK))
-        return;                            /* depth/stencil only */
     if (!s_gpu.color_offset || !s_gpu.pitch || !s_gpu.clip_h || bpp == 0)
         return;
     {
@@ -1693,9 +1698,12 @@ static float *zbuf_current(int create)
     return s_zbufs[i].z;
 }
 
-static void zbuf_clear(void)
+static void zbuf_clear(int gpu_clear)
 {
-    nv_gpu_sync_reason("CPU depth clear");
+    if (!gpu_clear)
+    {
+        nv_gpu_sync_reason("CPU depth clear");
+    }
     float *z = zbuf_current(1), v = zclear_value();
     size_t k;
     if (z)
@@ -2166,6 +2174,51 @@ static int gpu_triangle_outside(const float *a, const float *b, const float *c)
         (a[1]<=top && b[1]<=top && c[1]<=top);
 }
 
+static Nv2aVshOutput s_xf[NV_MAX_INDICES];
+/* Batch-local identities come from the existing transform-cache decision.
+ * Constant-writing programs retain distinct outputs. Clipped temporary vertices
+ * are never identified by their recycled stack addresses. */
+static uint32_t s_xf_identity[NV_MAX_INDICES];
+static unsigned s_gpu_vertex_index[NV_MAX_INDICES];
+static int s_gpu_indexed_batch;
+
+#if defined(_WIN32)
+static unsigned gpu_append_transformed_vertex(const Nv2aVshOutput *source)
+{
+    uintptr_t address = (uintptr_t)source;
+    uintptr_t first = (uintptr_t)s_xf;
+    unsigned *cached = NULL;
+    if (address >= first && address < first + sizeof(s_xf) &&
+        (address - first) % sizeof(*s_xf) == 0)
+    {
+        unsigned identity = s_xf_identity[(address - first) / sizeof(*s_xf)];
+        cached = &s_gpu_vertex_index[identity];
+        if (*cached != UINT32_MAX)
+        {
+            return *cached;
+        }
+    }
+    NvGpuVertex vertex;
+    memcpy(vertex.pos, source->pos, 16);
+    memcpy(vertex.color, source->d0, 16);
+    memcpy(vertex.secondary, source->d1, 16);
+    memcpy(vertex.tex, source->tex[0], 16);
+    gpu_scale_texture(0, vertex.tex);
+    for (unsigned stage = 1; stage < 4; stage++)
+    {
+        memcpy(vertex.extra[stage - 1], source->tex[stage], 16);
+        gpu_scale_texture(stage, vertex.extra[stage - 1]);
+    }
+    vertex.fog = fog_factor(source->fog[0]);
+    unsigned index = nv_gpu_append_vertex(&vertex);
+    if (cached)
+    {
+        *cached = index;
+    }
+    return index;
+}
+#endif
+
 static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
                                const Nv2aVshOutput *vc)
 {
@@ -2221,6 +2274,18 @@ static void raster_xf_triangle(const Nv2aVshOutput *va, const Nv2aVshOutput *vb,
         }
         s_gpu.xf_drawn++;
         if (T.simple_rc) s_gpu.simple_rc_triangles++;
+        if (s_gpu_indexed_batch)
+        {
+            unsigned indices[3];
+            for (k = 0; k < 3; k++)
+            {
+                indices[k] = gpu_append_transformed_vertex(v[k]);
+            }
+            nv_gpu_indexed_triangle(indices);
+            s_gpu.tris_drawn++;
+            note_drawn();
+            return;
+        }
         NvGpuVertex vertices[3];
         for (k = 0; k < 3; k++) {
             memcpy(vertices[k].pos, v[k]->pos, 16);
@@ -2398,7 +2463,7 @@ static void raster_xf_clipped(const Nv2aVshOutput *a, const Nv2aVshOutput *b,
     for (i = 1; i + 1 < n; i++) raster_xf_triangle(&poly[0], &poly[i], &poly[i + 1]);
 }
 
-static Nv2aVshOutput s_xf[NV_MAX_INDICES];
+
 
 /* Disabled arrays use latched attributes. Copy these together instead of
  * entering the format/guest-memory fetch routine for each disabled stream. */
@@ -2529,9 +2594,11 @@ static int transform_batch_vertices(uint32_t n)
     for (i = 0; i < n; i++) {
         uint32_t index = s_gpu.idx[i];
         if (cache && seen[index] == generation) {
+            s_xf_identity[i] = first[index];
             s_xf[i] = s_xf[first[index]];
             continue;
         }
+        s_xf_identity[i] = i;
         if (!transform_vertex(index, &s_xf[i])) return 0;
         s_xf[i].pos[0] = truncf(s_xf[i].pos[0] * 16.0f) / 16.0f;
         s_xf[i].pos[1] = truncf(s_xf[i].pos[1] * 16.0f) / 16.0f;
@@ -2781,6 +2848,11 @@ static void raster_batch_program(void)
 #if defined(_WIN32)
     if (profile) QueryPerformanceCounter(&start);
     s_gpu_batch = gpu_begin_batch();
+    s_gpu_indexed_batch = s_gpu_batch && nv_gpu_indexed_upload_enabled();
+    if (s_gpu_indexed_batch)
+    {
+        for (i = 0; i < n; i++) s_gpu_vertex_index[i] = UINT32_MAX;
+    }
     if (!s_gpu_batch) nv_gpu_sync_reason("software program draw");
     if (profile) {
         QueryPerformanceCounter(&end);
@@ -3704,6 +3776,8 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         s_gpu.blend_dfactor = param;
         break;
     case NV097_CLEAR_SURFACE:
+    {
+        int gpu_clear = 0;
         if (s_ftrace == 2)
             fprintf(stderr, "[FTRACE] clear %X surf %08X %ux%u colour %08X%c",
                     param, s_gpu.color_offset, s_gpu.clip_w, s_gpu.clip_h,
@@ -3717,16 +3791,37 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
                 if(!surface_write_refused(base,(s_gpu.clip_y+s_gpu.clip_h)*s_gpu.pitch,"clear"))
                     clear_color=(uint8_t*)xbox_GetMemoryOffset()+base;
             }
-            nv_gpu_discard_overwritten(clear_color,s_gpu.pitch,
-                ((s_gpu.format>>8)&15)==2?s_gpu.format:0,
-                s_gpu.clip_x,s_gpu.clip_y,s_gpu.clip_w,s_gpu.clip_h,
-                (param&1)?zbuf_current(0):NULL);
+            NvGpuClear clear = {0};
+            clear.color = clear_color;
+            clear.depth = (param & 1) ? zbuf_current(0) : NULL;
+            clear.pitch = s_gpu.pitch;
+            clear.format = ((s_gpu.format >> 8) & 15) == 2 ? s_gpu.format : 0;
+            clear.x = s_gpu.clip_x;
+            clear.y = s_gpu.clip_y;
+            clear.width = s_gpu.clip_w;
+            clear.height = s_gpu.clip_h;
+            clear.color_value = s_gpu.clear_color;
+            clear.depth_value = zclear_value();
+            /* Full CPU overwrites can be mirrored on the current GPU target.
+             * Partial/channel clears keep the compatibility synchronization. */
+            if (!(param & NV097_CLEAR_COLOR_MASK) || clear_color)
+            {
+                gpu_clear = nv_gpu_clear_attachments(&clear);
+            }
+            if (!gpu_clear)
+            {
+                nv_gpu_discard_overwritten(clear_color,s_gpu.pitch,
+                    ((s_gpu.format>>8)&15)==2?s_gpu.format:0,
+                    s_gpu.clip_x,s_gpu.clip_y,s_gpu.clip_w,s_gpu.clip_h,
+                    (param&1)?zbuf_current(0):NULL);
+            }
         }
 #endif
-        clear_surface(param);
+        clear_surface(param, gpu_clear);
         if (param & 0x01)                         /* Z */
-            zbuf_clear();
+            zbuf_clear(gpu_clear);
         break;
+    }
 
     case NV097_SET_BEGIN_END:
         if (param) {

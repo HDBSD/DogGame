@@ -9,6 +9,7 @@ static uint32_t pixels[64*64];static float zvalues[64*64];
 static int internal;
 static float quad_offset;
 static float quad_fog=1;
+static unsigned quad_repetitions=1;
 static unsigned internal_w=1280,internal_h=960;
 extern "C" int xbox_DisplayInternalScaling(void){return internal;}
 extern "C" unsigned xbox_DisplayResolutionSelected(void){return 0;}
@@ -26,7 +27,13 @@ static void quad(float z,float r,float g,float b,float alpha){
  NvGpuVertex v[6]={};float xy[6][2]={{0,0},{64,0},{0,64},{64,0},{64,64},{0,64}};
  for(unsigned i=0;i<6;i++){v[i].pos[0]=xy[i][0]+quad_offset;v[i].pos[1]=xy[i][1];v[i].pos[2]=z;v[i].pos[3]=1;v[i].color[0]=r;v[i].color[1]=g;v[i].color[2]=b;v[i].color[3]=alpha;v[i].tex[0]=xy[i][0]/64;v[i].tex[1]=xy[i][1]/64;v[i].tex[3]=1;v[i].fog=quad_fog;}
  for(unsigned i=0;i<6;i++)for(unsigned st=0;st<3;st++)memcpy(v[i].extra[st],v[i].tex,16);
- nv_gpu_triangle(v);nv_gpu_triangle(v+3);nv_gpu_end();
+ if(quad_repetitions>1 && nv_gpu_indexed_upload_enabled()){
+  unsigned index[4];index[0]=nv_gpu_append_vertex(v);index[1]=nv_gpu_append_vertex(v+1);
+  index[2]=nv_gpu_append_vertex(v+2);index[3]=nv_gpu_append_vertex(v+4);
+  unsigned a[3]={index[0],index[1],index[2]},b[3]={index[1],index[3],index[2]};
+  for(unsigned i=0;i<quad_repetitions;i++){nv_gpu_indexed_triangle(a);nv_gpu_indexed_triangle(b);}
+ }else for(unsigned i=0;i<quad_repetitions;i++){nv_gpu_triangle(v);nv_gpu_triangle(v+3);}
+ nv_gpu_end();
 }
 #define CHECK(x) do{if(!(x)){fprintf(stderr,"Failed line %d\n",__LINE__);return 1;}}while(0)
 int main(){
@@ -118,6 +125,63 @@ int main(){
   d.depth_write=0;CHECK(nv_gpu_begin(&d));quad(.3,1,0,0,1);nv_gpu_sync();
   CHECK(depth_readbacks==reads+1 && fabs(zvalues[32*64+32]-.4)<1e-6);
   d.depth_write=1;
+ }
+
+ /* GPU clears mirror immediate full CPU overwrites without synchronizing
+  * the attachment that will be discarded or losing the other attachment. */
+ {
+  uint32_t fixture_pixels[4096];float fixture_depth[4096];
+  memcpy(fixture_pixels,pixels,sizeof pixels);memcpy(fixture_depth,zvalues,sizeof zvalues);
+  NvGpuDraw fixture=d;fixture.color=(uint8_t*)fixture_pixels;fixture.depth=fixture_depth;
+  NvGpuDraw &d=fixture;uint32_t (&pixels)[4096]=fixture_pixels;float (&zvalues)[4096]=fixture_depth;
+  NvGpuClear clear={};clear.color=d.color;clear.depth=d.depth;clear.pitch=d.pitch;
+  clear.width=clear.height=64;clear.color_value=0xFF2468AC;clear.depth_value=1;
+  CHECK(nv_gpu_begin(&d));quad(.2,1,0,0,1);
+  uint64_t reads=readbacks;
+  CHECK(nv_gpu_clear_attachments(&clear));
+  for(unsigned i=0;i<4096;i++){pixels[i]=clear.color_value;zvalues[i]=1;}
+  CHECK(!dirty && !color_dirty && !depth_dirty && readbacks==reads);
+  CHECK(nv_gpu_begin(&d));CHECK(readbacks==reads);quad(.7,0,1,0,1);nv_gpu_sync();
+  CHECK(pixels[2048]==0xFF00FF00 && fabs(zvalues[2048]-.7)<1e-6);
+
+  CHECK(nv_gpu_begin(&d));quad(.2,1,0,0,1);
+  /* CPU edits between a mirrored clear and the next draw must be uploaded. */
+  CHECK(nv_gpu_clear_attachments(&clear));
+  for(unsigned i=0;i<4096;i++){pixels[i]=clear.color_value;zvalues[i]=1;}
+  pixels[32*64+48]=0xFFFF0000;
+  d.clip_w=32;CHECK(nv_gpu_begin(&d));quad(.6,0,1,0,1);nv_gpu_sync();
+  CHECK(pixels[32*64+16]==0xFF00FF00 && pixels[32*64+48]==0xFFFF0000);
+  d.clip_w=64;CHECK(nv_gpu_begin(&d));quad(.2,1,0,0,1);
+  clear.color=nullptr;CHECK(nv_gpu_clear_attachments(&clear));
+  for(float &z:zvalues)z=1;
+  CHECK(dirty && color_dirty && !depth_dirty);
+  CHECK(nv_gpu_begin(&d));quad(.6,0,0,1,1);nv_gpu_sync();
+  CHECK(pixels[2048]==0xFF0000FF && fabs(zvalues[2048]-.6)<1e-6);
+
+  CHECK(nv_gpu_begin(&d));quad(.2,1,0,0,1);
+  clear.color=d.color;clear.depth=nullptr;clear.color_value=0xFF00FF00;
+  CHECK(nv_gpu_clear_attachments(&clear));
+  for(uint32_t &p:pixels)p=clear.color_value;
+  CHECK(dirty && !color_dirty && depth_dirty);
+  CHECK(nv_gpu_begin(&d));quad(.8,0,0,1,1);nv_gpu_sync();
+  CHECK(pixels[2048]==0xFF00FF00 && fabs(zvalues[2048]-.2)<1e-6);
+
+  CHECK(nv_gpu_begin(&d));quad(.1,1,0,0,1);
+  clear.width=32;uint64_t clears=gpu_color_clears;
+  CHECK(!nv_gpu_clear_attachments(&clear));
+  CHECK(gpu_color_clears==clears && dirty && color_dirty);
+  clear.width=64;clear.depth=zvalues+1;
+  CHECK(!nv_gpu_clear_attachments(&clear));CHECK(gpu_color_clears==clears);
+  nv_gpu_sync();CHECK(pixels[2048]==0xFFFF0000);
+ }
+
+ /* No writable attachment means no compatibility readback is needed. */
+ {
+  NvGpuDraw masked=d;masked.mask=0;masked.depth_write=0;
+  uint64_t reads=readbacks;
+  CHECK(nv_gpu_begin(&masked));quad(.1,0,1,0,1);
+  CHECK(!color_dirty && !depth_dirty && !dirty);
+  nv_gpu_sync();CHECK(readbacks==reads);
  }
  /* Complete clear discard must skip only overwritten attachments. */
  {
@@ -285,6 +349,7 @@ int main(){
  ID3D11Texture2D *large_target=color;
  d.surface_offset=nullptr;d.surface_format=0;d.mode=2;d.textured=0;
  d.mask=0x01010101;
+ CHECK(nv_gpu_begin(&d));large_target=color;
  for(unsigned pass=0;pass<10;pass++){
   d.width=d.height=d.clip_w=d.clip_h=32;d.pitch=128;
   CHECK(nv_gpu_begin(&d));quad(.1,1,0,0,1);nv_gpu_sync();
@@ -293,7 +358,7 @@ int main(){
   CHECK(nv_gpu_begin(&d));quad(.1,0,1,0,1);nv_gpu_sync();
   CHECK(color==large_target);CHECK(pixels[32*64+32]==0xFF00FF00);
  }
- CHECK(target_pool.size()==1);
+ CHECK(target_pool.size()<=8);
  // Fill and wrap the production streaming buffer without intermediate
  // readbacks. Earlier geometry must keep its original vertex data.
  d.clip_x=0;d.clip_w=32;CHECK(nv_gpu_begin(&d));quad(.1,1,0,0,1);
@@ -380,6 +445,151 @@ int main(){
   quad(.5,0,1,0,1);nv_gpu_sync();CHECK(scene[32*640+32]==0xFF00FF00);
   CHECK(!nv_gpu_present_image(d.color,d.pitch,&pw,&ph));
  }
+ /* A guest-sized full clear must clear the entire physical scaled target. */
+ {
+  std::vector<uint32_t> image(640*480,0xFFFF0000);
+  std::vector<float> depths(640*480,1);
+  NvGpuDraw scaled={};scaled.color=(uint8_t*)image.data();scaled.depth=depths.data();
+  scaled.mode=2;scaled.mask=0x01010101;scaled.src=1;scaled.zscale=1;
+  scaled.depth_test=scaled.depth_write=1;scaled.depth_func=0x201;
+  scaled.width=scaled.clip_w=640;scaled.height=scaled.clip_h=480;
+  scaled.pitch=640*4;scaled.depth_stride=640;
+  internal=1;CHECK(nv_gpu_begin(&scaled));quad(.2,1,0,0,1);
+  NvGpuClear clear={};clear.color=scaled.color;clear.depth=scaled.depth;
+  clear.pitch=scaled.pitch;clear.width=640;clear.height=480;
+  clear.color_value=0xFF2468AC;clear.depth_value=1;
+  uint64_t reads=readbacks;CHECK(nv_gpu_clear_attachments(&clear));
+  std::fill(image.begin(),image.end(),clear.color_value);std::fill(depths.begin(),depths.end(),1);
+  CHECK(nv_gpu_begin(&scaled));CHECK(readbacks==reads);quad(.7,0,1,0,1);nv_gpu_sync();
+  CHECK(image[400*640+500]==clear.color_value && image[32*640+32]==0xFF00FF00);
+  CHECK(fabs(depths[32*640+32]-.7)<1e-6 && depths[400*640+500]==1);
+  internal=0;
+ }
+ /* Same-size surfaces retain independent GPU colour/depth contents. CPU
+  * mutations invalidate each attachment independently at the next rebind. */
+ {
+  std::vector<uint32_t> a(64*64,0),b(64*64,0);
+  std::vector<float> za(64*64,1),zb(64*64,1);
+  NvGpuDraw surface={};surface.width=surface.height=surface.clip_w=surface.clip_h=64;
+  surface.pitch=256;surface.depth_stride=64;surface.mode=2;
+  surface.mask=0x01010101;surface.src=1;surface.zscale=1;
+  surface.depth_test=surface.depth_write=1;surface.depth_func=0x201;
+  surface.color=(uint8_t*)a.data();surface.depth=za.data();
+  CHECK(nv_gpu_begin(&surface));quad(.2,1,0,0,1);nv_gpu_sync();
+  ID3D11Texture2D *first_color=color,*first_depth=depth;
+  surface.color=(uint8_t*)b.data();surface.depth=zb.data();
+  CHECK(nv_gpu_begin(&surface));quad(.8,0,1,0,1);nv_gpu_sync();
+  surface.color=(uint8_t*)a.data();surface.depth=za.data();
+  uint64_t kept_color=resident_color_hits,kept_depth=resident_depth_hits;
+  CHECK(nv_gpu_begin(&surface));
+  if(resident_surfaces_enabled()){
+   CHECK(color==first_color && depth==first_depth);
+   CHECK(resident_color_hits==kept_color+1 && resident_depth_hits==kept_depth+1);
+  }
+  quad(.5,0,0,1,1);nv_gpu_sync();CHECK(a[32*64+32]==0xFFFF0000);
+  std::fill(za.begin(),za.end(),1.f);kept_color=resident_color_hits;kept_depth=resident_depth_hits;
+  CHECK(nv_gpu_begin(&surface));
+  if(resident_surfaces_enabled())CHECK(resident_color_hits==kept_color+1 && resident_depth_hits==kept_depth);
+  quad(.5,0,0,1,1);nv_gpu_sync();CHECK(a[32*64+32]==0xFF0000FF);
+  a[32*64+32]=0xFFFFFFFF;surface.clip_w=16;surface.depth_test=surface.depth_write=0;
+  kept_color=resident_color_hits;CHECK(nv_gpu_begin(&surface));
+  if(resident_surfaces_enabled())CHECK(resident_color_hits==kept_color);
+  quad(.1,0,1,0,1);nv_gpu_sync();
+  CHECK(a[32*64+32]==0xFFFFFFFF && a[32*64+8]==0xFF00FF00);
+  /* A layout change at the same address must not reuse the old GPU image. */
+  surface.width=32;surface.clip_w=16;kept_color=resident_color_hits;
+  CHECK(nv_gpu_begin(&surface));CHECK(resident_color_hits==kept_color);
+  quad(.1,1,0,0,1);nv_gpu_sync();CHECK(a[32*64+8]==0xFFFF0000);
+  /* Uniform CPU contents reproduce exact colour/depth values on the GPU
+   * without uploading either attachment. Guest clear values above zscale
+   * retain their CPU representation while the GPU stores normalized one. */
+  surface.width=64;surface.clip_w=16;
+  std::fill(a.begin(),a.end(),0x7F13579Bu);std::fill(za.begin(),za.end(),2.5f);
+  uint64_t color_clears=resident_color_clears,depth_clears=resident_depth_clears;
+  uint64_t color_bytes=surface_color_upload_bytes,depth_bytes=surface_depth_upload_bytes;
+  CHECK(nv_gpu_begin(&surface));
+  if(resident_surfaces_enabled()){
+   CHECK(resident_color_clears==color_clears+1 && resident_depth_clears==depth_clears+1);
+   CHECK(surface_color_upload_bytes==color_bytes && surface_depth_upload_bytes==depth_bytes);
+  }
+  quad(.1,0,1,0,1);nv_gpu_sync();
+  CHECK(a[32*64+32]==0x7F13579B && a[32*64+8]==0xFF00FF00 && za[32*64+32]==2.5f);
+  context->CopyResource(depth_read,depth);D3D11_MAPPED_SUBRESOURCE mapped={};
+  CHECK(SUCCEEDED(context->Map(depth_read,0,D3D11_MAP_READ,0,&mapped)));
+  CHECK(((const float*)((const char*)mapped.pData+32*mapped.RowPitch))[32]==1.f);
+  context->Unmap(depth_read,0);
+ }
+ /* Bounded residency evicts old identities and reloads their CPU contents. */
+ {
+  std::vector<std::vector<uint32_t>> images(12,std::vector<uint32_t>(64*64,0xFFFF0000));
+  NvGpuDraw surface={};surface.width=surface.height=surface.clip_w=surface.clip_h=64;
+  surface.pitch=256;surface.mode=2;surface.mask=0x01010101;surface.src=1;surface.zscale=1;
+  for(unsigned i=0;i<images.size();i++){
+   surface.color=(uint8_t*)images[i].data();CHECK(nv_gpu_begin(&surface));quad(.5,1,0,0,1);nv_gpu_sync();
+   CHECK(target_pool.size()<=8 && surface_pool_bytes()<=surface_pool_budget);
+  }
+  if(resident_surfaces_enabled())for(const auto &entry:target_pool)CHECK(entry.guest.color!=(uint8_t*)images[0].data());
+  surface.color=(uint8_t*)images[0].data();surface.clip_w=16;
+  CHECK(nv_gpu_begin(&surface));quad(.5,0,1,0,1);nv_gpu_sync();
+  CHECK(images[0][32*64+32]==0xFFFF0000 && images[0][32*64+8]==0xFF00FF00);
+ }
+ /* Force indexed draws across DISCARD/NO_OVERWRITE and both ring wraps. */
+ {
+  std::vector<uint32_t> image(64*64,0);
+  NvGpuDraw repeated={};repeated.color=(uint8_t*)image.data();
+  repeated.width=repeated.height=repeated.clip_w=repeated.clip_h=64;
+  repeated.pitch=64*4;repeated.mode=2;repeated.mask=0x01010101;repeated.src=1;repeated.zscale=1;
+  quad_repetitions=32;uint64_t before=indexed_batches;
+  for(unsigned i=0;i<180;i++){
+   CHECK(nv_gpu_begin(&repeated));quad(.5,i==179?0:1,i==179?1:0,0,1);
+   if(i==0){vertex_cursor=capacity-2;if(index_capacity)index_cursor=index_capacity-8;}
+  }
+  quad_repetitions=1;nv_gpu_sync();CHECK(image[32*64+32]==0xFF00FF00);
+  CHECK(nv_gpu_indexed_upload_enabled()?indexed_batches==before+180:indexed_batches==before);
+ }
+ /* A failed optional index upload must expand the original triangle stream,
+  * draw it directly, and allow a later indexed upload to recover. */
+ if(nv_gpu_indexed_upload_enabled())
+ {
+  std::vector<uint32_t> image(64*64,0);NvGpuDraw fallback={};
+  fallback.color=(uint8_t*)image.data();fallback.width=fallback.height=64;
+  fallback.clip_w=fallback.clip_h=64;fallback.pitch=64*4;
+  fallback.mode=2;fallback.mask=0x01010101;fallback.src=1;fallback.zscale=1;
+  release(index_buffer);index_cursor=0;index_capacity=32768;
+  D3D11_BUFFER_DESC wrong={};wrong.ByteWidth=index_capacity*4;
+  wrong.BindFlags=D3D11_BIND_INDEX_BUFFER;wrong.Usage=D3D11_USAGE_DEFAULT;
+  CHECK(SUCCEEDED(device->CreateBuffer(&wrong,nullptr,&index_buffer)));
+  quad_repetitions=32;uint64_t before=indexed_batches;
+  CHECK(nv_gpu_begin(&fallback));quad(.5,1,0,0,1);nv_gpu_sync();
+  CHECK(indexed_batches==before && image[32*64+32]==0xFFFF0000);
+  release(index_buffer);index_capacity=index_cursor=0;
+  CHECK(nv_gpu_begin(&fallback));quad(.5,0,1,0,1);nv_gpu_sync();
+  CHECK(indexed_batches==before+1 && image[32*64+32]==0xFF00FF00);
+  quad_repetitions=1;
+ }
+ /* Repeated batches reuse bindings/constants; readback must force a rebind.
+  * The second draw also exercises changed vertex data with unchanged state. */
+ {
+  std::vector<uint32_t> image(64*64,0);
+  NvGpuDraw repeated={};repeated.color=(uint8_t*)image.data();
+  repeated.width=repeated.height=repeated.clip_w=repeated.clip_h=64;
+  repeated.pitch=64*4;repeated.mode=2;repeated.mask=0x01010101;
+  repeated.src=1;repeated.zscale=1;
+  CHECK(nv_gpu_begin(&repeated));quad(.5,1,0,0,1);
+  uint64_t bindings=pipeline_binds,constants=constant_uploads;
+  CHECK(nv_gpu_begin(&repeated));quad(.5,0,1,0,1);
+  if(submission_cache_enabled())CHECK(pipeline_binds==bindings && constant_uploads==constants);
+  else CHECK(pipeline_binds>bindings && constant_uploads>constants);
+  nv_gpu_sync();CHECK(image[32*64+32]==0xFF00FF00);
+  bindings=pipeline_binds;constants=constant_uploads;
+  CHECK(nv_gpu_begin(&repeated));quad(.5,0,0,1,1);nv_gpu_sync();
+  CHECK(pipeline_binds>bindings && image[32*64+32]==0xFF0000FF);
+  if(submission_cache_enabled())CHECK(constant_uploads==constants);
+  /* Scissor changes must take effect even when other pipeline state matches. */
+  repeated.clip_w=16;
+  CHECK(nv_gpu_begin(&repeated));quad(.5,1,0,0,1);nv_gpu_sync();
+  CHECK(image[32*64+8]==0xFFFF0000 && image[32*64+32]==0xFF0000FF);
+ }
  CHECK(getenv("RECOMP_GPU_RESOLVE") && !strcmp(getenv("RECOMP_GPU_RESOLVE"),"0") ? gpu_resolves==0 : gpu_resolves>0);
  CHECK(getenv("RECOMP_GPU_DEPTH_RESOLVE") && !strcmp(getenv("RECOMP_GPU_DEPTH_RESOLVE"),"0") ? gpu_depth_resolves==0 : gpu_depth_resolves>0);
  CHECK(getenv("RECOMP_GPU_SIMPLE_SHADERS") && !strcmp(getenv("RECOMP_GPU_SIMPLE_SHADERS"),"0") ? simple_shader_draws==0 : simple_shader_draws>0);
@@ -390,7 +600,7 @@ int main(){
 '''
 out=here/'irq-test-build';(out/'gpu_raster.cpp').write_text(code)
 project=(out/'apu_irq_harness.vcxproj').read_text().replace('apu_irq_harness.c','gpu_raster.cpp').replace('obj\\apu_irq\\','obj\\gpu_raster\\')
-project=project.replace('</ItemDefinitionGroup>','<Link><AdditionalDependencies>d3d11.lib;d3dcompiler.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>')
+project=project.replace('</ItemDefinitionGroup>','<Link><AdditionalDependencies>d3d11.lib;d3dcompiler.lib;dxguid.lib;%(AdditionalDependencies)</AdditionalDependencies></Link></ItemDefinitionGroup>')
 (out/'gpu_raster.vcxproj').write_text(project)
 subprocess.run([msbuild,str(out/'gpu_raster.vcxproj'),'/p:Configuration=Release','/p:Platform=x64','/verbosity:minimal'],check=True)
 subprocess.run([str(out/'bin/gpu_raster.exe')],check=True)
@@ -400,3 +610,9 @@ subprocess.run([str(out/'bin/gpu_raster.exe')],check=True,env={**os.environ,'REC
 subprocess.run([str(out/'bin/gpu_raster.exe')],check=True,env={**os.environ,'RECOMP_GPU_SIMPLE_SHADERS':'0'})
 
 subprocess.run([str(out/'bin/gpu_raster.exe')],check=True,env={**os.environ,'RECOMP_GPU_RENDERED_TEXTURES':'0'})
+
+subprocess.run([str(out/'bin/gpu_raster.exe')],check=True,env={**os.environ,'RECOMP_GPU_STATE_CACHE':'0'})
+
+subprocess.run([str(out/'bin/gpu_raster.exe')],check=True,env={**os.environ,'RECOMP_GPU_INDEXED_UPLOAD':'0'})
+
+subprocess.run([str(out/'bin/gpu_raster.exe')],check=True,env={**os.environ,'RECOMP_GPU_RESIDENT_SURFACES':'0'})

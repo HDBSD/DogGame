@@ -41,6 +41,17 @@ New policy belongs in an intent-based helper. A small guest entry point routes t
 
 ## Validation limits
 
+The [first graphics optimization pass](../GRAPHICS_OPTIMIZATION_PROGRESS.md)
+documents mirrored GPU/CPU clears, preservation of unrelated dirty attachments,
+post-clear CPU-edit validation, repaint snapshot reuse and the before/after
+H001 measurements. The clear path is optional and falls back without side
+effects when the complete attachment overwrite cannot be established.
+
+The [graphics pipeline audit](../GRAPHICS_PIPELINE_AUDIT.md) traces the active
+NV2A/D3D11/framebuffer route, documents source-established repeated work and
+serial native/scaled H001 profiles, and lists the ownership and correctness
+tests required before removing compatibility transfers.
+
 On 15 October 2026, the portable Clang build failed during device initialization.
 Both supplied `DogGame-crash-20261015-0130*.dmp` files stopped in host code for
 `sub_0017ACD8`, at instruction bytes `23 14 08` (`AND edx, [rax+rcx]`). The native
@@ -71,3 +82,9 @@ were relinked after this adjustment. Generated-code shift warnings remain;
 startup success does not establish correctness of every generated routine.
 
 Synthetic tests can verify layout handling, preserved state, call order, press-edge changes, and copied geometry. Syntax checks verify that the source compiles against the available headers. Neither substitutes for a full link and a gameplay run of the supported XBE. Record those separately when performed.
+
+The graphics submission follow-up tracks title-thread D3D11 bindings and exact constant-buffer contents; synchronization invalidates binding assumptions. Display composition borrows immutable published high-resolution pixels only while holding the publication lock. These are host-side optimizations established from the maintained backend and pixel/window fixtures, not newly recovered guest behavior. See `GRAPHICS_OPTIMIZATION_PROGRESS.md` for contracts, counter definitions and H001 measurements; GPU readback/GDI presentation remains in use.
+
+The indexed host geometry bridge reuses the batch identities already established by `transform_batch_vertices()` in `runtime_overrides/src/kernel/nv2a_pb_exec.c`. It retains distinct outputs for constant-writing programs and does not reuse clipped stack temporaries. `nv2a_gpu.h` exposes copied vertices and batch-local triangle indices; the D3D11 backend preserves triangle order and falls back to direct upload on index-buffer failure. This is an optimization of the maintained host bridge, not fresh recovery of a guest algorithm. Transfer measurements, tests and the missing interpreter-reference fixture are recorded in `GRAPHICS_OPTIMIZATION_PROGRESS.md`.
+
+The host backend now retains actual GPU surface pairs rather than only reusing allocations by dimensions. `select_surface_resources()`, `same_surface_layout()` and the per-attachment snapshot helpers in `runtime_overrides/src/kernel/nv2a_gpu.cpp` define title-thread ownership and rebind validation. Inactive compatible native targets can be sampled directly; uniform CPU contents can be reproduced through exact attachment clears. The evidence is maintained backend inspection, offscreen GPU pixel tests and H001 comparison captures. No new Ghidra recovery or guest access tracking is claimed. Existing CPU visibility boundaries remain in force; snapshots cannot identify identical-byte writes or allocation lifetime changes. See `GRAPHICS_OPTIMIZATION_PROGRESS.md` for limits and measurements.

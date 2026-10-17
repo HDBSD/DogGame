@@ -7,6 +7,8 @@ extern "C" {
 #endif
 typedef struct {float pos[4], color[4], secondary[4], tex[4], extra[3][4], fog;} NvGpuVertex;
 typedef int (*NvGpuDecode)(void *, unsigned, unsigned, uint32_t *);
+/* Pure layout decoder: the result must depend only on format, x and y.
+ * Residency caches decoded offsets while that format/layout is retained. */
 typedef uint64_t (*NvGpuSurfaceOffset)(unsigned, unsigned, unsigned);
 typedef struct {
     unsigned valid,width,height,addr_u,addr_v,linear;
@@ -33,12 +35,32 @@ typedef struct {
 int nv_gpu_enabled(void);
 int nv_gpu_begin(const NvGpuDraw *);
 void nv_gpu_triangle(const NvGpuVertex *);
+/* Title thread, between successful begin/end. Vertices are copied; returned
+ * indices belong only to this batch. Emit only valid indices from this batch.
+ * Preserve original triangle/provoking-vertex order. No guest memory access. */
+unsigned nv_gpu_append_vertex(const NvGpuVertex *vertex);
+void nv_gpu_indexed_triangle(const unsigned indices[3]);
+int nv_gpu_indexed_upload_enabled(void);
 void nv_gpu_end(void);
 void nv_gpu_sync(void);
 void nv_gpu_sync_reason(const char *reason);
 void nv_gpu_sync_depth(const char *reason);
 void nv_gpu_prepare_depth_change(const uint8_t *next_color);
 void nv_gpu_discard_overwritten(const uint8_t *color, unsigned pitch, unsigned format, unsigned x, unsigned y, unsigned width, unsigned height, const float *depth);
+typedef struct
+{
+    const uint8_t *color;
+    const float *depth;
+    unsigned pitch, format, x, y, width, height;
+    uint32_t color_value;
+    float depth_value;
+} NvGpuClear;
+
+/* Title/render thread only. Returns 1 when complete attachment clears were
+ * issued on the current GPU target. The caller must immediately perform the
+ * matching CPU clears without another sync. Unrelated dirty attachments stay
+ * GPU-owned. Returns 0 without side effects for unsupported/partial clears. */
+int nv_gpu_clear_attachments(const NvGpuClear *clear);
 const uint32_t *nv_gpu_present_image(const uint8_t *, unsigned, unsigned *, unsigned *);
 void nv_gpu_report(void);
 void nv_gpu_texture_barrier(const uint8_t *, uint64_t);

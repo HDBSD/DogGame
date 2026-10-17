@@ -253,9 +253,38 @@ static RECT display_view(HWND hwnd)
 static uint32_t     *s_present[2];
 static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
 static SRWLOCK s_present_lock=SRWLOCK_INIT;
-static uint32_t *s_high_present[2],*s_high_rgb;
-static size_t s_high_capacity[2],s_high_rgb_capacity;
+static uint32_t *s_high_present[2];
+static const uint32_t *s_high_rgb;
+static size_t s_high_capacity[2];
 static unsigned s_high_width[2],s_high_height[2],s_high_draw_width,s_high_draw_height;
+/* Window thread only, with s_present_lock held shared through every GDI
+ * consumer. The publisher owns these snapshots and cannot replace, resize or
+ * overwrite them while that lock is held. Borrowing the published image avoids
+ * another full-resolution allocation and copy per frame. Never retain the
+ * pointer after unlocking, including across window message dispatch. */
+static void borrow_high_snapshot(void)
+{
+    s_high_rgb = NULL;
+    s_high_draw_width = s_high_draw_height = 0;
+    LONG index = s_present_idx;
+    if (index < 0 || !xbox_DisplayInternalScaling())
+    {
+        return;
+    }
+    if (s_high_present[index] && s_high_width[index] && s_high_height[index])
+    {
+        s_high_rgb = s_high_present[index];
+        s_high_draw_width = s_high_width[index];
+        s_high_draw_height = s_high_height[index];
+    }
+}
+
+static void release_high_snapshot(void)
+{
+    s_high_rgb = NULL;
+    s_high_draw_width = s_high_draw_height = 0;
+}
+
 static void (*s_world_capture)(void);
 void xbox_DebugWorldFrameRegister(void (*capture)(void)) {s_world_capture=capture;}
 
@@ -584,7 +613,11 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             BITMAPINFO bi;memset(&bi,0,sizeof bi);
             bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=s_fb_width;bi.bmiHeader.biHeight=-(LONG)s_fb_height;
             bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;bi.bmiHeader.biCompression=BI_RGB;
+            AcquireSRWLockShared(&s_present_lock);
+            borrow_high_snapshot();
             display_draw(h,(HDC)w,&bi);
+            release_high_snapshot();
+            ReleaseSRWLockShared(&s_present_lock);
         }
         return 0;
     case WM_CLOSE:
@@ -855,6 +888,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
         /* The snapshot callback and RGB image are published together. Hold
          * through composition so a newer camera cannot accompany an old frame. */
         AcquireSRWLockShared(&s_present_lock);
+        borrow_high_snapshot();
         if (s_present_idx >= 0 && s_rgb) {
             /* A finished frame, published by the flip. Copied into s_rgb so
              * the dump path and GDI see one consistent image even if the
@@ -863,18 +897,6 @@ static DWORD WINAPI fb_thread(LPVOID unused)
             if (s_present[idx])
                 memcpy(s_rgb, s_present[idx],
                        (size_t)s_fb_width * s_fb_height * 4);
-            s_high_draw_width=s_high_draw_height=0;
-            size_t count=(size_t)s_high_width[idx]*s_high_height[idx];
-            if(count && xbox_DisplayInternalScaling()){
-                if(s_high_rgb_capacity<count){
-                    uint32_t *buffer=(uint32_t*)realloc(s_high_rgb,count*4);
-                    if(buffer){s_high_rgb=buffer;s_high_rgb_capacity=count;}
-                }
-                if(s_high_rgb_capacity>=count){
-                    memcpy(s_high_rgb,s_high_present[idx],count*4);
-                    s_high_draw_width=s_high_width[idx];s_high_draw_height=s_high_height[idx];
-                }
-            }
             fb_overlay();
         } else if (s_fb_va && s_fb_pitch && s_rgb) {
             /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
@@ -886,6 +908,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
         }
         {
             display_draw(hwnd,hdc,&bi);
+            release_high_snapshot();
             ReleaseSRWLockShared(&s_present_lock);
             /* One dump a few seconds in, so the title has had time to render
              * something rather than catching the first blank frame.
@@ -932,7 +955,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
     if(s_paint_dc){if(s_paint_bitmap){SelectObject(s_paint_dc,s_paint_old);DeleteObject(s_paint_bitmap);}DeleteDC(s_paint_dc);s_paint_dc=NULL;s_paint_bitmap=NULL;}
     ReleaseDC(hwnd, hdc);
     DestroyWindow(hwnd);
-    free(s_high_rgb);s_high_rgb=NULL;s_high_rgb_capacity=0;
+    release_high_snapshot();
     for(unsigned i=0;i<2;i++){free(s_high_present[i]);s_high_present[i]=NULL;s_high_capacity[i]=0;}
     free(s_rgb);
     s_rgb = NULL;

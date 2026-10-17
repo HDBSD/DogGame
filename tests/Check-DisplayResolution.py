@@ -93,6 +93,27 @@ int main(void) {
         SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
     }
 
+    /* Borrowed high-resolution images remain publisher-owned. Selecting a
+     * new publication or disabling scaling must never retain the old view. */
+    {
+        uint32_t first[4]={1,2,3,4},second[9]={0};
+        int was_scaling=s_internal_scaling;s_internal_scaling=1;
+        s_high_present[0]=first;s_high_width[0]=s_high_height[0]=2;
+        s_high_present[1]=second;s_high_width[1]=s_high_height[1]=3;
+        AcquireSRWLockShared(&s_present_lock);
+        s_present_idx=0;borrow_high_snapshot();
+        CHECK(s_high_rgb==first && s_high_draw_width==2);
+        release_high_snapshot();CHECK(!s_high_rgb && !s_high_draw_width);
+        s_present_idx=1;borrow_high_snapshot();
+        CHECK(s_high_rgb==second && s_high_draw_height==3);
+        s_internal_scaling=0;borrow_high_snapshot();CHECK(!s_high_rgb);
+        s_present_idx=-1;borrow_high_snapshot();CHECK(!s_high_draw_width);
+        ReleaseSRWLockShared(&s_present_lock);
+        s_internal_scaling=was_scaling;
+        s_high_present[0]=s_high_present[1]=NULL;
+        s_high_width[0]=s_high_width[1]=s_high_height[0]=s_high_height[1]=0;
+    }
+
     CHECK(hwnd);
     wchar_t tempdir[MAX_PATH],config[MAX_PATH];CHECK(GetTempPathW(MAX_PATH,tempdir));
     CHECK(GetTempFileNameW(tempdir,L"sdr",0,config));wcscpy(s_display_ini,config);
