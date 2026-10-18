@@ -9,7 +9,7 @@
 #include "api/title_guest_state.h"
 #include "title_debug_geometry.h"
 #include <windows.h>
-#include <Xinput.h>
+#include <xbox/host_gamepad.h>
 #include <xbox/debug_overlay.h>
 #include <xbox/display_options.h>
 #include <stdio.h>
@@ -59,7 +59,8 @@ volatile LONG title_debug_monster_safe, title_debug_noclip;
 static DWORD s_trace_until, s_profile_until;
 static volatile LONG s_pending_capture;
 static DWORD s_capture_until;
-static WORD s_last_buttons;
+/* Keep short taps across slow frames; this cursor never consumes guest input. */
+static HostGamepadMenuReader s_menu_input;
 
 static void queue_action(TitleDebugAction action, LONG argument)
 {
@@ -266,57 +267,78 @@ static void draw_debug_text(HDC dc, int x, int y, const char *s)
     TextOutA(dc, x, y, s, (int)strlen(s));
 }
 
-static void debug_draw(void *device, unsigned width, unsigned height)
+/* Window-thread policy updates run independently of frame composition. */
+static void debug_input(void)
 {
-    HDC dc = (HDC)device;
-    XINPUT_STATE pad;
-    /* Back opens the debug page only while paused; capture all guest input until
-  * the closing button has been released to avoid dismissing the native menu. */
-    if (XInputGetState(0, &pad) == ERROR_SUCCESS)
+    if (!s_pause && s_open)
     {
-        WORD b = pad.Gamepad.wButtons, edge = b & ~s_last_buttons;
-        s_last_buttons = b;
-        if (s_pause && (edge & XINPUT_GAMEPAD_BACK))
+        close_debug();
+    }
+    for (unsigned pending = 0; pending < 128; pending++)
+    {
+        XINPUT_STATE pad;
+        /* Back opens the debug page only while paused; capture all guest input until
+      * the closing button has been released to avoid dismissing the native menu. */
+        WORD edge = 0;
+        if (host_gamepad_read_menu(0, &s_menu_input, &pad, &edge) == ERROR_SUCCESS)
         {
-            debug_key(VK_F1);
+            WORD b = pad.Gamepad.wButtons;
+            if (s_pause && (edge & XINPUT_GAMEPAD_BACK))
+            {
+                debug_key(VK_F1);
+            }
+            if (s_open)
+            {
+                if (edge & XINPUT_GAMEPAD_DPAD_UP)
+                {
+                    debug_key(VK_UP);
+                }
+                if (edge & XINPUT_GAMEPAD_DPAD_DOWN)
+                {
+                    debug_key(VK_DOWN);
+                }
+                if (edge & XINPUT_GAMEPAD_DPAD_LEFT)
+                {
+                    debug_key(VK_LEFT);
+                }
+                if (edge & XINPUT_GAMEPAD_DPAD_RIGHT)
+                {
+                    debug_key(VK_RIGHT);
+                }
+                if (edge & XINPUT_GAMEPAD_A)
+                {
+                    debug_key(VK_RETURN);
+                }
+                if (edge & XINPUT_GAMEPAD_B)
+                {
+                    debug_key(VK_ESCAPE);
+                }
+            }
+            if (!s_open && GetTickCount() - s_capture_until < 0x80000000u &&
+                !(b & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)))
+            {
+                xbox_DebugOverlayCapture(0);
+            }
         }
-        if (s_open)
-        {
-            if (edge & XINPUT_GAMEPAD_DPAD_UP)
-            {
-                debug_key(VK_UP);
-            }
-            if (edge & XINPUT_GAMEPAD_DPAD_DOWN)
-            {
-                debug_key(VK_DOWN);
-            }
-            if (edge & XINPUT_GAMEPAD_DPAD_LEFT)
-            {
-                debug_key(VK_LEFT);
-            }
-            if (edge & XINPUT_GAMEPAD_DPAD_RIGHT)
-            {
-                debug_key(VK_RIGHT);
-            }
-            if (edge & XINPUT_GAMEPAD_A)
-            {
-                debug_key(VK_RETURN);
-            }
-            if (edge & XINPUT_GAMEPAD_B)
-            {
-                debug_key(VK_ESCAPE);
-            }
-        }
-        if (!s_open && GetTickCount() - s_capture_until < 0x80000000u &&
-            !(b & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_BACK)))
+        else if (!s_open && GetTickCount() - s_capture_until < 0x80000000u)
         {
             xbox_DebugOverlayCapture(0);
         }
+        if (edge && getenv("DOGGAME_INPUT_TRACE"))
+        {
+            fprintf(stderr, "[INPUT TRACE %llu] debug edge=%04X available=%ld open=%d\n",
+                    (unsigned long long)GetTickCount64(), edge, (long)s_pause, (int)s_open);
+        }
+        if (!edge)
+        {
+            break;
+        }
     }
-    else if (!s_open && GetTickCount() - s_capture_until < 0x80000000u)
-    {
-        xbox_DebugOverlayCapture(0);
-    }
+}
+
+static void debug_draw(void *device, unsigned width, unsigned height)
+{
+    HDC dc = (HDC)device;
     if (s_pending_capture)
     {
         SetBkMode(dc, TRANSPARENT);
@@ -336,10 +358,6 @@ static void debug_draw(void *device, unsigned width, unsigned height)
     }
     if (!s_pause)
     {
-        if (s_open)
-        {
-            close_debug();
-        }
         return;
     }
     SetBkMode(dc, TRANSPARENT);
@@ -400,6 +418,7 @@ static void setup_debug(void)
     }
     done = 1;
     discover_levels();
+    xbox_DebugOverlayUpdateRegister(debug_input);
     xbox_DebugOverlayRegister(debug_draw, debug_key);
     xbox_DebugOverlayGraph(title_options.fps_graph);
     title_debug_geometry_init();

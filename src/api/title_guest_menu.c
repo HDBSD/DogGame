@@ -15,7 +15,11 @@ enum
     CONTROLLER_COUNT = 4,
     GUEST_POINTER_SIZE = 4,
     CONTROLLER_BYTES_REQUIRED = 0x34,
+    CONTROLLER_HELD_OFFSET = 0x2C,
     CONTROLLER_PRESSED_OFFSET = 0x30,
+    MAIN_MENU_ELAPSED_ADDRESS = 0x001A4F14,
+    SAVE_DIALOGUE_ELAPSED_ADDRESS = 0x001A5220,
+    UI_MINIMUM_ELAPSED_ADDRESS = 0x0018131C,
     SCENE_BYTES_REQUIRED = 0x1B0,
     SCENE_FONT_COUNT_OFFSET = 0x100,
     SCENE_FONT_ITEMS_OFFSET = 0x1AC,
@@ -100,4 +104,32 @@ void remap_controller_press_edges(TitleMenuButton source, TitleMenuButton destin
                 (pressed & ~(uint32_t)source) | (uint32_t)destination;
         }
     }
+}
+
+int title_menu_input_snapshot(TitleMenuInputSnapshot *snapshot)
+{
+    if (!snapshot)
+    {
+        return 0;
+    }
+    snapshot->mode = title_menu_current_mode();
+    /* Main/save wrappers pass these deltas to sub_000791B0. Its entry at
+     * 0x000791B0 compares against 0x0018131C and returns at 0x000794EB
+     * when elapsed <= that threshold. This diagnoses the gate; it does not
+     * assert that a skipped update explains a particular user's trace. */
+    snapshot->main_elapsed = MEMF(MAIN_MENU_ELAPSED_ADDRESS);
+    snapshot->save_elapsed = MEMF(SAVE_DIALOGUE_ELAPSED_ADDRESS);
+    snapshot->ui_minimum_elapsed = MEMF(UI_MINIMUM_ELAPSED_ADDRESS);
+    snapshot->held = snapshot->pressed = 0;
+    uint32_t controller = MEM32(CONTROLLER_TABLE_ADDRESS);
+    if (!guest_object_readable(controller, CONTROLLER_BYTES_REQUIRED))
+    {
+        return 0;
+    }
+    /* sub_00090F50, loc_00091192: pressed = new & ~old; +0x2C
+     * receives new held state and +0x30 receives pressed, both dword stores.
+     * Evidence is the existing translation, not a fresh Ghidra recovery. */
+    snapshot->held = MEM32(controller + CONTROLLER_HELD_OFFSET);
+    snapshot->pressed = MEM32(controller + CONTROLLER_PRESSED_OFFSET);
+    return 1;
 }

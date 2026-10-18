@@ -15,6 +15,7 @@
 #include "../../include/xbox/input_method.h"
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 /* ======================================================================== */
 #if defined(_WIN32)
@@ -143,6 +144,28 @@ void xbox_InputInit(void)
     }
 }
 
+/* Diagnostics observe the state handed to USB, not the native game's later
+ * XAPI read. Log transitions plus long poll gaps so the two can be compared. */
+static void trace_guest_input(DWORD port, const XBOX_INPUT_STATE *state, const char *reason)
+{
+    if (port || !getenv("DOGGAME_INPUT_TRACE"))
+    {
+        return;
+    }
+    static __declspec(thread) XBOX_GAMEPAD previous;
+    static __declspec(thread) ULONGLONG last_poll;
+    ULONGLONG now = GetTickCount64();
+    if (memcmp(&previous, &state->Gamepad, sizeof(previous)) || !last_poll || now - last_poll > 100)
+    {
+        fprintf(stderr, "[INPUT TRACE %llu] USB-source %s gap=%llu buttons=%04X A=%u B=%u left=%d,%d\n",
+                (unsigned long long)now, reason, (unsigned long long)(last_poll ? now - last_poll : 0),
+                state->Gamepad.wButtons, state->Gamepad.bAnalogButtons[XBOX_BUTTON_A],
+                state->Gamepad.bAnalogButtons[XBOX_BUTTON_B], state->Gamepad.sThumbLX, state->Gamepad.sThumbLY);
+    }
+    previous = state->Gamepad;
+    last_poll = now;
+}
+
 DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
 {
     XINPUT_STATE xi_state;
@@ -163,7 +186,7 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
         input_method_pad(result==ERROR_SUCCESS?&xi_state.Gamepad:&idle);
     }
 
-    if(xbox_DebugOverlayCaptured()) {memset(pState,0,sizeof *pState);pState->dwPacketNumber=GetTickCount();return ERROR_SUCCESS;}
+    if(xbox_DebugOverlayCaptured()) {memset(pState,0,sizeof *pState);pState->dwPacketNumber=GetTickCount();trace_guest_input(dwPort,pState,"captured");return ERROR_SUCCESS;}
 
     if(dwPort==0) {
         if(InterlockedExchange(&s_start_request,0))start_end=GetTickCount64()+250;
@@ -177,6 +200,7 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
         g_controller_connected[dwPort] = FALSE;
         if (dwPort == 0 && keyboard_enabled()) {
             keyboard_state(pState);
+            trace_guest_input(dwPort, pState, "keyboard");
             return ERROR_SUCCESS;
         }
         return result;
@@ -238,6 +262,7 @@ DWORD xbox_InputGetState(DWORD dwPort, XBOX_INPUT_STATE *pState)
         pState->dwPacketNumber = kb.dwPacketNumber;
     }
 
+    trace_guest_input(dwPort, pState, "merged");
     return ERROR_SUCCESS;
 }
 

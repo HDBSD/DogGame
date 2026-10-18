@@ -13,6 +13,7 @@ set(KERNEL_SOURCES
     kernel_thread.c
     kernel_sync.c
     kernel_hal.c
+    guest_clock.c
     kernel_xbox.c
     kernel_ob.c
     kernel_io.c

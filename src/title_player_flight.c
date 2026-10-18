@@ -4,7 +4,7 @@
 #include "api/title_guest_player.h"
 #include "api/title_guest_state.h"
 #include <windows.h>
-#include <Xinput.h>
+#include <xbox/host_gamepad.h>
 #include <xbox/debug_overlay.h>
 #include <math.h>
 #include <stdlib.h>
@@ -42,7 +42,7 @@ int title_debug_player_flight(void)
     XINPUT_STATE pad;
     if (xbox_FramebufferFocused() && !xbox_DebugOverlayCaptured())
     {
-        if (XInputGetState(0, &pad) == ERROR_SUCCESS)
+        if (host_gamepad_get_state(0, &pad) == ERROR_SUCCESS)
         {
             int lx = pad.Gamepad.sThumbLX, ly = pad.Gamepad.sThumbLY;
             if (abs(lx) > XINPUT_GAMEPAD_LEFT_THUMB_DEADZONE)

@@ -23,4 +23,18 @@ int title_menu_map_page_visible(uint32_t scene, uint32_t menu_mode);
 int menu_accepts_back(uint32_t menu_mode);
 void remap_controller_press_edges(TitleMenuButton source, TitleMenuButton destination);
 
+/* Observation only, title thread. Copies the current decoded player-one state;
+ * not an atomic snapshot of the asynchronous USB/XAPI transport. No mutations.
+ * Returns zero for an unreadable controller pointer. */
+typedef struct TitleMenuInputSnapshot
+{
+    uint32_t mode;
+    uint32_t held;
+    uint32_t pressed;
+    float main_elapsed;
+    float save_elapsed;
+    float ui_minimum_elapsed;
+} TitleMenuInputSnapshot;
+int title_menu_input_snapshot(TitleMenuInputSnapshot *snapshot);
+
 #endif

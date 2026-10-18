@@ -1,7 +1,10 @@
 # Xbox input uses XInput supplied with Windows 8 and later. The generic MinGW
 # xinput library imports XINPUT1_3, which requires the legacy DirectX package.
 add_library(xbox_input STATIC xinput_device.c)
-target_include_directories(xbox_input PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
+target_include_directories(xbox_input PUBLIC
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/../../include
+)
 
 if(WIN32)
     # Build the pinned controller backend into DogGame; no SDL DLL/runtime install.

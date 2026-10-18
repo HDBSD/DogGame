@@ -12,6 +12,7 @@
  */
 
 #include "kernel.h"
+#include "guest_clock.h"
 #include "xbox_memory_layout.h"   /* RECOMP_TLS, g_fs_base */
 #include <stdio.h>
 #include <stdlib.h>
@@ -333,7 +334,7 @@ KIRQL __stdcall xbox_KeRaiseIrqlToDpcLevel(void)
  *
  * Exported as a data pointer, not a function. The Xbox kernel increments
  * this every ~1ms (approximating the Xbox tick interval).
- * Updated lazily when read, using GetTickCount.
+ * Updated lazily from the shared guest millisecond clock.
  * ============================================================================ */
 
 volatile ULONG xbox_KeTickCount = 0;
@@ -341,7 +342,7 @@ volatile ULONG xbox_KeTickCount = 0;
 /* Call this periodically or on-demand to update KeTickCount */
 static void xbox_update_tick_count(void)
 {
-    xbox_KeTickCount = GetTickCount();
+    xbox_KeTickCount = (ULONG)xbox_GuestMilliseconds();
 }
 
 /* ============================================================================
@@ -1032,11 +1033,11 @@ VOID __stdcall xbox_DbgBreakPoint(void)
 ULONGLONG __stdcall xbox_KeQueryInterruptTime(void)
 {
     /*
-     * Time since boot in NT 100ns units. GetTickCount64 is milliseconds, so
+     * Time since boot in NT 100ns units. The shared guest clock is milliseconds, so
      * scale by 10,000. Resolution is coarser than the real kernel's, but it is
      * monotonic, which is the property callers actually depend on.
      */
-    return (ULONGLONG)GetTickCount64() * 10000ULL;
+    return (ULONGLONG)xbox_GuestMilliseconds() * 10000ULL;
 }
 
 /* ============================================================================

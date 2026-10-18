@@ -5,6 +5,12 @@
  * the window thread; queue guest actions instead of executing them there. */
 typedef void (*XboxOverlayDraw)(void *dc, unsigned width, unsigned height);
 typedef int (*XboxOverlayKey)(unsigned key);
+/* Register before opening the window. Updates run once per UI iteration,
+ * before frame acquisition, on the window thread. Queue guest actions here;
+ * drawing/printing a window must never consume controller input. */
+typedef void (*XboxOverlayUpdate)(void);
+void xbox_DebugOverlayUpdateRegister(XboxOverlayUpdate update);
+void xbox_MenuOverlayUpdateRegister(XboxOverlayUpdate update);
 void xbox_DebugOverlayRegister(XboxOverlayDraw draw, XboxOverlayKey key);
 /* World diagnostics draw before menus. Pixels are ARGB, composed against the
  * displayed framebuffer without modifying it; callable only on the UI thread. */

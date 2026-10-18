@@ -35,6 +35,15 @@ static uint32_t      s_fb_va, s_fb_pitch, s_fb_width = 640, s_fb_height = 480;
 static int s_pvideo_active; /* Actual movie pixels this frame, not feature enablement. */
 static uint32_t     *s_rgb;           /* converted 32-bit copy for GDI */
 static XboxOverlayDraw s_menu_draw;
+static XboxOverlayUpdate s_menu_update, s_debug_update;
+void xbox_DebugOverlayUpdateRegister(XboxOverlayUpdate update)
+{
+    s_debug_update = update;
+}
+void xbox_MenuOverlayUpdateRegister(XboxOverlayUpdate update)
+{
+    s_menu_update = update;
+}
 static XboxOverlayKey s_menu_key;
 static XboxMenuClick s_menu_click;
 static XboxMenuHover s_menu_hover;
@@ -459,7 +468,6 @@ static void debug_panel_background(HDC dc,int x,int y,int width,int height) {
     StretchDIBits(dc,x,y,width,height,0,0,width,height,panel,&info,DIB_RGB_COLORS,SRCCOPY);
 }
 static void debug_overlay_draw(HDC dc) {
-    if(s_debug_world_draw) s_debug_world_draw(dc,s_fb_width,s_fb_height);
     if(s_menu_draw) s_menu_draw(dc,s_fb_width,s_fb_height);
     if(s_debug_draw) s_debug_draw(dc,s_fb_width,s_fb_height);
     if(s_debug_graph) {
@@ -508,30 +516,110 @@ static void display_draw_content(HWND hwnd,HDC dc,const BITMAPINFO *bi)
     SetWindowExtEx(dc,s_fb_width,s_fb_height,NULL);
     SetViewportExtEx(dc,view.right-view.left,view.bottom-view.top,NULL);
     SetViewportOrgEx(dc,view.left,view.top,NULL);
-    debug_overlay_draw(dc);
+    if (s_debug_world_draw) s_debug_world_draw(dc, s_fb_width, s_fb_height);
     RestoreDC(dc,saved);
 }
 
 /* Compose the game, world diagnostics and menus offscreen before one blit.
  * Drawing the base image directly to the window exposed it between overlay
  * paints, especially while collision rasterization was in progress. */
-static HDC s_paint_dc;
-static HBITMAP s_paint_bitmap;
-static HGDIOBJ s_paint_old;
-static LONG s_paint_width,s_paint_height;
-static void display_draw(HWND hwnd,HDC dc,const BITMAPINFO *bi) {
-    if(!s_debug_world_draw){display_draw_content(hwnd,dc,bi);return;}
-    RECT r;GetClientRect(hwnd,&r);if(r.right<=0||r.bottom<=0)return;
-    if(!s_paint_dc)s_paint_dc=CreateCompatibleDC(dc);
-    if(!s_paint_dc)return;
-    if(r.right!=s_paint_width||r.bottom!=s_paint_height||!s_paint_bitmap) {
-        HBITMAP bitmap=CreateCompatibleBitmap(dc,r.right,r.bottom);if(!bitmap)return;
-        if(s_paint_bitmap){SelectObject(s_paint_dc,s_paint_old);DeleteObject(s_paint_bitmap);}
-        s_paint_bitmap=bitmap;s_paint_old=SelectObject(s_paint_dc,bitmap);
-        s_paint_width=r.right;s_paint_height=r.bottom;
+/* UI-owned bitmaps retain a complete background, including its matching world
+ * diagnostics. Menus compose over that image even when publication is busy.
+ * No borrowed publisher pointers survive the shared-lock scope. */
+typedef struct WindowCanvas
+{
+    HDC dc;
+    HBITMAP bitmap;
+    HGDIOBJ original;
+    LONG width, height;
+} WindowCanvas;
+
+static WindowCanvas s_base_canvas, s_menu_canvas;
+
+static void release_canvas(WindowCanvas *canvas)
+{
+    if (canvas->dc)
+    {
+        SelectObject(canvas->dc, canvas->original);
+        DeleteObject(canvas->bitmap);
+        DeleteDC(canvas->dc);
     }
-    display_draw_content(hwnd,s_paint_dc,bi);
-    BitBlt(dc,0,0,r.right,r.bottom,s_paint_dc,0,0,SRCCOPY);
+    memset(canvas, 0, sizeof(*canvas));
+}
+
+static int resize_canvas(WindowCanvas *canvas, HDC dc, LONG width, LONG height)
+{
+    if (canvas->dc && canvas->width == width && canvas->height == height)
+    {
+        return 1;
+    }
+    HDC next_dc = CreateCompatibleDC(dc);
+    HBITMAP bitmap = CreateCompatibleBitmap(dc, width, height);
+    if (!next_dc || !bitmap)
+    {
+        if (next_dc) DeleteDC(next_dc);
+        if (bitmap) DeleteObject(bitmap);
+        return 0;
+    }
+    release_canvas(canvas);
+    canvas->dc = next_dc;
+    canvas->bitmap = bitmap;
+    canvas->original = SelectObject(next_dc, bitmap);
+    canvas->width = width;
+    canvas->height = height;
+    PatBlt(next_dc, 0, 0, width, height, BLACKNESS);
+    return 1;
+}
+
+static void window_update_input(void)
+{
+    static ULONGLONG last_update;
+    ULONGLONG started = GetTickCount64();
+    int trace = getenv("DOGGAME_INPUT_TRACE") != NULL;
+    if (trace && last_update && started - last_update > 100)
+    {
+        fprintf(stderr, "[INPUT TRACE %llu] UI update gap=%llu ms\n",
+                (unsigned long long)started, (unsigned long long)(started - last_update));
+    }
+    last_update = started;
+    if (s_menu_update)
+    {
+        s_menu_update();
+    }
+    if (s_debug_update)
+    {
+        s_debug_update();
+    }
+}
+
+static void display_draw(HWND hwnd, HDC dc, const BITMAPINFO *bi, int refresh_base)
+{
+    RECT client, view = display_view(hwnd);
+    GetClientRect(hwnd, &client);
+    if (client.right <= 0 || client.bottom <= 0 ||
+        view.right <= view.left || view.bottom <= view.top)
+    {
+        return;
+    }
+    if (!resize_canvas(&s_base_canvas, dc, client.right, client.bottom) ||
+        !resize_canvas(&s_menu_canvas, dc, client.right, client.bottom))
+    {
+        return;
+    }
+    if (refresh_base)
+    {
+        display_draw_content(hwnd, s_base_canvas.dc, bi);
+    }
+    BitBlt(s_menu_canvas.dc, 0, 0, client.right, client.bottom,
+           s_base_canvas.dc, 0, 0, SRCCOPY);
+    int saved = SaveDC(s_menu_canvas.dc);
+    SetMapMode(s_menu_canvas.dc, MM_ANISOTROPIC);
+    SetWindowExtEx(s_menu_canvas.dc, s_fb_width, s_fb_height, NULL);
+    SetViewportExtEx(s_menu_canvas.dc, view.right - view.left, view.bottom - view.top, NULL);
+    SetViewportOrgEx(s_menu_canvas.dc, view.left, view.top, NULL);
+    debug_overlay_draw(s_menu_canvas.dc);
+    RestoreDC(s_menu_canvas.dc, saved);
+    BitBlt(dc, 0, 0, client.right, client.bottom, s_menu_canvas.dc, 0, 0, SRCCOPY);
 }
 
 void xbox_FramebufferWindowSetTitle(const uint16_t *name, int max_chars)
@@ -613,11 +701,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             BITMAPINFO bi;memset(&bi,0,sizeof bi);
             bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=s_fb_width;bi.bmiHeader.biHeight=-(LONG)s_fb_height;
             bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;bi.bmiHeader.biCompression=BI_RGB;
-            AcquireSRWLockShared(&s_present_lock);
-            borrow_high_snapshot();
-            display_draw(h,(HDC)w,&bi);
-            release_high_snapshot();
-            ReleaseSRWLockShared(&s_present_lock);
+            int acquired = TryAcquireSRWLockShared(&s_present_lock);
+            if (acquired) borrow_high_snapshot();
+            display_draw(h, (HDC)w, &bi, acquired);
+            if (acquired)
+            {
+                release_high_snapshot();
+                ReleaseSRWLockShared(&s_present_lock);
+            }
         }
         return 0;
     case WM_CLOSE:
@@ -628,6 +719,11 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 
     case WM_KEYDOWN:
     case WM_SYSKEYDOWN:
+        if (getenv("DOGGAME_INPUT_TRACE"))
+        {
+            fprintf(stderr, "[INPUT TRACE %llu] keyboard down=%u repeat=%d\n",
+                    (unsigned long long)GetTickCount64(), (unsigned)w, (l & (1L << 30)) != 0);
+        }
         if(m==WM_KEYDOWN && !(l&(1L<<30))) InterlockedIncrement(&s_keyboard_serial);
         if(m==WM_KEYDOWN && s_menu_key && s_menu_key((unsigned)w)) return 0;
         if(m==WM_KEYDOWN && w==VK_F1 && (l&(1L<<30))) return 0;
@@ -824,6 +920,37 @@ static void fb_overlay(void)
     }
 }
 
+/* Never wait for a publisher on the window thread. A busy publisher leaves
+ * the last coherent background available while input and menus keep updating. */
+static void display_present(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
+{
+    int acquired = TryAcquireSRWLockShared(&s_present_lock);
+    if (acquired) borrow_high_snapshot();
+    if (acquired && s_present_idx >= 0 && s_rgb) {
+        /* A finished frame, published by the flip. Copied into s_rgb so
+         * the dump path and GDI see one consistent image even if the
+         * next flip lands mid-blit. */
+        LONG idx = s_present_idx;
+        if (s_present[idx])
+            memcpy(s_rgb, s_present[idx],
+                   (size_t)s_fb_width * s_fb_height * 4);
+        fb_overlay();
+    } else if (acquired && s_fb_va && s_fb_pitch && s_rgb) {
+        /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
+         * before, which is also what a title that never flips needs. */
+        const uint8_t *src =
+            (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
+        fb_convert(src, s_fb_pitch / s_fb_width);
+        fb_overlay();
+    }
+    display_draw(hwnd, hdc, bi, acquired);
+    if (acquired)
+    {
+        release_high_snapshot();
+        ReleaseSRWLockShared(&s_present_lock);
+    }
+}
+
 static DWORD WINAPI fb_thread(LPVOID unused)
 {
     HWND hwnd;
@@ -883,33 +1010,11 @@ static DWORD WINAPI fb_thread(LPVOID unused)
         }
         if (InterlockedCompareExchange(&s_fb_running, 1, 1) != 1)
             break;
+        window_update_input();
         display_apply(hwnd);
         cursor_update(hwnd);
-        /* The snapshot callback and RGB image are published together. Hold
-         * through composition so a newer camera cannot accompany an old frame. */
-        AcquireSRWLockShared(&s_present_lock);
-        borrow_high_snapshot();
-        if (s_present_idx >= 0 && s_rgb) {
-            /* A finished frame, published by the flip. Copied into s_rgb so
-             * the dump path and GDI see one consistent image even if the
-             * next flip lands mid-blit. */
-            LONG idx = s_present_idx;
-            if (s_present[idx])
-                memcpy(s_rgb, s_present[idx],
-                       (size_t)s_fb_width * s_fb_height * 4);
-            fb_overlay();
-        } else if (s_fb_va && s_fb_pitch && s_rgb) {
-            /* No flip yet, or pinned with RECOMP_FB_VA: read guest memory as
-             * before, which is also what a title that never flips needs. */
-            const uint8_t *src =
-                (const uint8_t *)((uintptr_t)s_fb_va + xbox_GetMemoryOffset());
-            fb_convert(src, s_fb_pitch / s_fb_width);
-            fb_overlay();
-        }
+        display_present(hwnd, hdc, &bi);
         {
-            display_draw(hwnd,hdc,&bi);
-            release_high_snapshot();
-            ReleaseSRWLockShared(&s_present_lock);
             /* One dump a few seconds in, so the title has had time to render
              * something rather than catching the first blank frame.
              *
@@ -952,7 +1057,8 @@ static DWORD WINAPI fb_thread(LPVOID unused)
     }
 
     cursor_release();
-    if(s_paint_dc){if(s_paint_bitmap){SelectObject(s_paint_dc,s_paint_old);DeleteObject(s_paint_bitmap);}DeleteDC(s_paint_dc);s_paint_dc=NULL;s_paint_bitmap=NULL;}
+    release_canvas(&s_base_canvas);
+    release_canvas(&s_menu_canvas);
     ReleaseDC(hwnd, hdc);
     DestroyWindow(hwnd);
     release_high_snapshot();
@@ -1004,6 +1110,8 @@ void xbox_DisplayBorderlessSet(int enabled) { (void)enabled; }
 int xbox_DisplayInternalScaling(void) { return 0; }
 void xbox_DisplayInternalScalingSet(int enabled) { (void)enabled; }
 void xbox_DisplayDynamicPromptsSet(int enabled) { (void)enabled; }
+void xbox_DebugOverlayUpdateRegister(XboxOverlayUpdate u) { (void)u; }
+void xbox_MenuOverlayUpdateRegister(XboxOverlayUpdate u) { (void)u; }
 void xbox_DebugOverlayRegister(XboxOverlayDraw d, XboxOverlayKey k) { (void)d;(void)k; }
 void xbox_DebugWorldRegister(XboxOverlayDraw d) { (void)d; }
 void xbox_DebugWorldFrameRegister(void (*capture)(void)) { (void)capture; }

@@ -135,6 +135,65 @@ int main(void)
         CHECK(xbox_InputGetState(port, &guest) == ERROR_SUCCESS && guest.Gamepad.bAnalogButtons[XBOX_BUTTON_A] == 255);
         CHECK(guest.Gamepad.bAnalogButtons[XBOX_BUTTON_LTRIGGER] == 255);
     }
+    /* Simulate a slow menu frame: neither menu nor guest code polls between
+     * press and release. The independent sampler must retain the tap for both
+     * consumers without turning it into a held guest button. */
+    SDL_JoystickSetVirtualButton(first, SDL_CONTROLLER_BUTTON_A, 0);
+    Sleep(30);
+    HostGamepadMenuReader debug_menu = {0}, settings_menu = {0};
+    WORD pressed;
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_SUCCESS);
+    CHECK(host_gamepad_read_menu(first_port, &settings_menu, &state, &pressed) == ERROR_SUCCESS);
+    SDL_JoystickSetVirtualButton(first, SDL_CONTROLLER_BUTTON_BACK, 1);
+    Sleep(40);
+    SDL_JoystickSetVirtualButton(first, SDL_CONTROLLER_BUTTON_BACK, 0);
+    Sleep(80);
+    CHECK(host_gamepad_get_state(first_port, &state) == ERROR_SUCCESS && !state.Gamepad.wButtons);
+    XBOX_INPUT_STATE released_guest;
+    CHECK(xbox_InputGetState(first_port, &released_guest) == ERROR_SUCCESS && !released_guest.Gamepad.wButtons);
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_SUCCESS);
+    CHECK(pressed == XINPUT_GAMEPAD_BACK && !state.Gamepad.wButtons);
+    CHECK(host_gamepad_read_menu(first_port, &settings_menu, &state, &pressed) == ERROR_SUCCESS);
+    CHECK(pressed == XINPUT_GAMEPAD_BACK);
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_SUCCESS && !pressed);
+    SDL_JoystickSetVirtualButton(first, SDL_CONTROLLER_BUTTON_DPAD_DOWN, 1);
+    Sleep(30);
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_SUCCESS);
+    CHECK(pressed == XINPUT_GAMEPAD_DPAD_DOWN && state.Gamepad.wButtons == pressed);
+    Sleep(30);
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_SUCCESS && !pressed);
+    SDL_JoystickSetVirtualButton(first, SDL_CONTROLLER_BUTTON_DPAD_DOWN, 0);
+    Sleep(30);
+    /* Queue repeated navigation and confirm before either menu runs. The old
+     * bit history collapsed the two Down taps and lost the sequence. */
+    HostGamepadMenuReader burst_first = {0}, burst_second = {0};
+    CHECK(host_gamepad_read_menu(first_port, &burst_first, &state, &pressed) == ERROR_SUCCESS);
+    CHECK(host_gamepad_read_menu(first_port, &burst_second, &state, &pressed) == ERROR_SUCCESS);
+    const SDL_GameControllerButton burst_buttons[] = {
+        SDL_CONTROLLER_BUTTON_DPAD_DOWN, SDL_CONTROLLER_BUTTON_DPAD_DOWN,
+        SDL_CONTROLLER_BUTTON_A, SDL_CONTROLLER_BUTTON_DPAD_UP};
+    const WORD burst_expected[] = {
+        XINPUT_GAMEPAD_DPAD_DOWN, XINPUT_GAMEPAD_DPAD_DOWN,
+        XINPUT_GAMEPAD_A, XINPUT_GAMEPAD_DPAD_UP};
+    for (unsigned i = 0; i < 4; i++)
+    {
+        SDL_JoystickSetVirtualButton(first, burst_buttons[i], 1);
+        Sleep(25);
+        SDL_JoystickSetVirtualButton(first, burst_buttons[i], 0);
+        Sleep(25);
+    }
+    CHECK(host_gamepad_get_state(first_port, &state) == ERROR_SUCCESS && !state.Gamepad.wButtons);
+    for (unsigned i = 0; i < 4; i++)
+    {
+        CHECK(host_gamepad_read_menu(first_port, &burst_first, &state, &pressed) == ERROR_SUCCESS);
+        CHECK(pressed == burst_expected[i] && !state.Gamepad.wButtons);
+    }
+    CHECK(host_gamepad_read_menu(first_port, &burst_first, &state, &pressed) == ERROR_SUCCESS && !pressed);
+    for (unsigned i = 0; i < 4; i++)
+    {
+        CHECK(host_gamepad_read_menu(first_port, &burst_second, &state, &pressed) == ERROR_SUCCESS);
+        CHECK(pressed == burst_expected[i]);
+    }
     captured = 1;
     XBOX_INPUT_STATE guest;
     CHECK(xbox_InputGetState(first_port, &guest) == ERROR_SUCCESS && !guest.Gamepad.bAnalogButtons[XBOX_BUTTON_A]);
@@ -146,12 +205,14 @@ int main(void)
         if (SDL_JoystickGetDeviceInstanceID(i) == removed) { CHECK(SDL_JoystickDetachVirtual(i) == 0); break; }
     Sleep(3); CHECK(host_gamepad_get_state(first_port, &state) == ERROR_DEVICE_NOT_CONNECTED);
     CHECK(!state.Gamepad.wButtons && !state.Gamepad.sThumbLX);
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_DEVICE_NOT_CONNECTED && !pressed);
     CHECK(host_gamepad_get_state(second_port, &state) == ERROR_SUCCESS);
     CHECK(attach_controller(0x05C4, "DogGame reconnected virtual DualShock 4") >= 0);
     Sleep(1100); CHECK(host_gamepad_get_state(first_port, &state) == ERROR_SUCCESS);
+    CHECK(host_gamepad_read_menu(first_port, &debug_menu, &state, &pressed) == ERROR_SUCCESS && !pressed);
     CHECK(host_gamepad_get_state(4, &state) == ERROR_DEVICE_NOT_CONNECTED);
     CHECK(host_gamepad_get_state(0, NULL) == ERROR_DEVICE_NOT_CONNECTED);
     SDL_JoystickClose(second);
-    puts("Passed: virtual PS4/PS5 mapping, axes, triggers, packets, rumble, guest conversion, capture, disconnect/reconnect and stable ports.");
+    puts("Passed: virtual PS4/PS5 mapping, axes, triggers, packets, rumble, guest conversion, capture, independent menu tap retention, disconnect/reconnect and stable ports.");
     return 0;
 }

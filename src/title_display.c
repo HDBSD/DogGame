@@ -4,9 +4,10 @@
 #include "api/title_guest_menu.h"
 #include "api/title_guest_ui.h"
 #include <windows.h>
-#include <Xinput.h>
+#include <xbox/host_gamepad.h>
 #include <xbox/display_options.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <math.h>
 #include <xbox/debug_overlay.h>
@@ -32,8 +33,33 @@ static void remap_start_to_back_if_needed(uint32_t menu_mode)
     remap_controller_press_edges(BUTTON_START, BUTTON_BACK);
 }
 
+/* Compare native menu observations with the host/USB trace. This does not
+ * consume or rewrite input; asynchronous XAPI state may change between reads. */
+static void trace_native_menu_input(const char *boundary)
+{
+    if (!getenv("DOGGAME_INPUT_TRACE"))
+    {
+        return;
+    }
+    TitleMenuInputSnapshot snapshot;
+    int valid = title_menu_input_snapshot(&snapshot);
+    fprintf(stderr, "[INPUT TRACE %llu] native boundary=%s mode=%u valid=%d held=%08X pressed=%08X capture=%d\n",
+            (unsigned long long)GetTickCount64(), boundary, snapshot.mode, valid,
+            snapshot.held, snapshot.pressed, xbox_DebugOverlayCaptured());
+    if (snapshot.pressed)
+    {
+        uint32_t main_bits, save_bits, minimum_bits;
+        memcpy(&main_bits, &snapshot.main_elapsed, sizeof(main_bits));
+        memcpy(&save_bits, &snapshot.save_elapsed, sizeof(save_bits));
+        memcpy(&minimum_bits, &snapshot.ui_minimum_elapsed, sizeof(minimum_bits));
+        fprintf(stderr, "[INPUT TRACE %llu] native-edge-timing-v2 pressed=%08X main_bits=%08X save_bits=%08X minimum_bits=%08X\n",
+                (unsigned long long)GetTickCount64(), snapshot.pressed, main_bits, save_bits, minimum_bits);
+    }
+}
+
 void title_display_input_frame(void)
 {
+    trace_native_menu_input("after-poll");
     remap_start_to_back_if_needed(title_menu_current_mode());
 }
 
@@ -165,7 +191,8 @@ static void native_menu_frame(uint32_t scene, uint32_t mode)
 
 static volatile LONG s_options;
 static unsigned s_selection;
-static WORD s_last_buttons;
+/* Keep short taps across slow frames; this cursor never consumes guest input. */
+static HostGamepadMenuReader s_menu_input;
 static DWORD s_release_at;
 static uint32_t s_hidden_scene;
 static uint32_t s_cursor_item;
@@ -357,62 +384,78 @@ static void label(HDC dc, int x, int y, const char *value)
     TextOutA(dc, x, y, value, (int)strlen(value));
 }
 
+/* Window-thread policy updates run independently of frame composition. */
+static void display_input(void)
+{
+    for (unsigned pending = 0; pending < 128; pending++)
+    {
+        XINPUT_STATE pad;
+        WORD buttons = 0;
+        WORD edge = 0;
+        if (host_gamepad_read_menu(0, &s_menu_input, &pad, &edge) == ERROR_SUCCESS)
+        {
+            buttons = pad.Gamepad.wButtons;
+        }
+        if (!s_options && s_open)
+        {
+            close_display();
+        }
+        if (s_options && !s_open && (edge & XINPUT_GAMEPAD_Y))
+        {
+            display_key('R');
+        }
+        else if (s_open)
+        {
+            if (edge & XINPUT_GAMEPAD_DPAD_UP)
+            {
+                display_key(VK_UP);
+            }
+            if (edge & XINPUT_GAMEPAD_DPAD_DOWN)
+            {
+                display_key(VK_DOWN);
+            }
+            if (edge & XINPUT_GAMEPAD_DPAD_LEFT)
+            {
+                display_key(VK_LEFT);
+            }
+            if (edge & XINPUT_GAMEPAD_DPAD_RIGHT)
+            {
+                display_key(VK_RIGHT);
+            }
+            if (edge & XINPUT_GAMEPAD_A)
+            {
+                display_key(VK_RETURN);
+            }
+            if (edge & XINPUT_GAMEPAD_B)
+            {
+                display_key(VK_ESCAPE);
+            }
+        }
+        if (!s_open && (LONG)(GetTickCount() - s_release_at) >= 0 &&
+            !(buttons & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_Y)) &&
+            !(GetAsyncKeyState(VK_RETURN) & 0x8000) && !(GetAsyncKeyState('Z') & 0x8000) &&
+            !(GetAsyncKeyState('X') & 0x8000) && !(GetAsyncKeyState('L') & 0x8000) &&
+            !(GetAsyncKeyState(VK_SPACE) & 0x8000) && !(GetAsyncKeyState(VK_ESCAPE) & 0x8000))
+        {
+            xbox_MenuOverlayCapture(0);
+        }
+        if (edge && getenv("DOGGAME_INPUT_TRACE"))
+        {
+            fprintf(stderr, "[INPUT TRACE %llu] settings edge=%04X available=%ld open=%d\n",
+                    (unsigned long long)GetTickCount64(), edge, (long)s_options, (int)s_open);
+        }
+        if (!edge)
+        {
+            break;
+        }
+    }
+}
+
 static void display_draw(void *device, unsigned width, unsigned height)
 {
     (void)width;
     (void)height;
     HDC dc = (HDC)device;
-    XINPUT_STATE pad;
-    WORD buttons = 0;
-    if (XInputGetState(0, &pad) == ERROR_SUCCESS)
-    {
-        buttons = pad.Gamepad.wButtons;
-    }
-    WORD edge = buttons & ~s_last_buttons;
-    s_last_buttons = buttons;
-    if (!s_options && s_open)
-    {
-        close_display();
-    }
-    if (s_options && !s_open && (edge & XINPUT_GAMEPAD_Y))
-    {
-        display_key('R');
-    }
-    else if (s_open)
-    {
-        if (edge & XINPUT_GAMEPAD_DPAD_UP)
-        {
-            display_key(VK_UP);
-        }
-        if (edge & XINPUT_GAMEPAD_DPAD_DOWN)
-        {
-            display_key(VK_DOWN);
-        }
-        if (edge & XINPUT_GAMEPAD_DPAD_LEFT)
-        {
-            display_key(VK_LEFT);
-        }
-        if (edge & XINPUT_GAMEPAD_DPAD_RIGHT)
-        {
-            display_key(VK_RIGHT);
-        }
-        if (edge & XINPUT_GAMEPAD_A)
-        {
-            display_key(VK_RETURN);
-        }
-        if (edge & XINPUT_GAMEPAD_B)
-        {
-            display_key(VK_ESCAPE);
-        }
-    }
-    if (!s_open && (LONG)(GetTickCount() - s_release_at) >= 0 &&
-        !(buttons & (XINPUT_GAMEPAD_A | XINPUT_GAMEPAD_B | XINPUT_GAMEPAD_Y)) &&
-        !(GetAsyncKeyState(VK_RETURN) & 0x8000) && !(GetAsyncKeyState('Z') & 0x8000) &&
-        !(GetAsyncKeyState('X') & 0x8000) && !(GetAsyncKeyState('L') & 0x8000) &&
-        !(GetAsyncKeyState(VK_SPACE) & 0x8000) && !(GetAsyncKeyState(VK_ESCAPE) & 0x8000))
-    {
-        xbox_MenuOverlayCapture(0);
-    }
     if (!s_options)
     {
         return;
@@ -495,6 +538,7 @@ static void display_draw(void *device, unsigned width, unsigned height)
 
 void title_display_init(void)
 {
+    xbox_MenuOverlayUpdateRegister(display_input);
     xbox_MenuOverlayRegister(display_draw, display_key, display_click);
     xbox_MenuOverlayHoverRegister(display_hover);
 }
@@ -608,6 +652,7 @@ static int main_options_visible(uint32_t scene)
 
 void title_display_frame(void)
 {
+    trace_native_menu_input("frame-hook");
     /* Main-menu Options uses UI visibility, not the generic Options mode. */
     uint32_t mode = title_state_menu_mode();
     remap_start_to_back_if_needed(mode);

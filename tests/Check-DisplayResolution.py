@@ -31,6 +31,15 @@ code = r'''
 #include <stdlib.h>
 ptrdiff_t xbox_GetMemoryOffset(void) { return 0; }
 ''' + '#include "' + source.as_posix() + '"\n' + r'''
+#include <xbox/host_gamepad.h>
+static WORD menu_fixture[8];
+static unsigned menu_fixture_count, menu_fixture_next;
+DWORD host_gamepad_read_menu(DWORD port, HostGamepadMenuReader *reader, XINPUT_STATE *state, WORD *pressed)
+{
+    (void)port;(void)reader;memset(state,0,sizeof(*state));
+    *pressed=menu_fixture_next<menu_fixture_count?menu_fixture[menu_fixture_next++]:0;
+    return ERROR_SUCCESS;
+}
 static unsigned char ram[0x200000];
 static ptrdiff_t g_xbox_mem_offset=(ptrdiff_t)ram;
 #define MEM32(a) (*(uint32_t *)(ram+(a)))
@@ -67,6 +76,30 @@ static void sub_000BDE40(void) {
 #define CHECK(c) do { if (!(c)) { fprintf(stderr,"Failed line %d: %s\n",__LINE__,#c); return 1; } } while(0)
 static int clicked_x,clicked_y;
 static int click(int x,int y) { clicked_x=x;clicked_y=y;return 1; }
+static HANDLE publication_ready, publication_release;
+static unsigned input_updates, overlay_draws, world_draws, keyboard_events;
+static DWORD WINAPI hold_publication(void *unused)
+{
+    (void)unused;
+    AcquireSRWLockExclusive(&s_present_lock);
+    SetEvent(publication_ready);
+    WaitForSingleObject(publication_release, 1500);
+    ReleaseSRWLockExclusive(&s_present_lock);
+    return 0;
+}
+static void menu_update(void) { input_updates++; }
+static int menu_key(unsigned key)
+{
+    if (key == VK_DOWN) keyboard_events++;
+    return 1;
+}
+static void menu_draw(void *dc, unsigned w, unsigned h)
+{
+    (void)w;(void)h;overlay_draws++;
+    SetPixel((HDC)dc, 100, 100, RGB(0,255,0));
+}
+static void world_draw(void *dc, unsigned w, unsigned h)
+{ (void)dc;(void)w;(void)h;world_draws++; }
 int main(void) {
     WNDCLASSA wc={0};wc.lpfnWndProc=fb_wndproc;wc.hInstance=GetModuleHandle(NULL);wc.lpszClassName="DisplayResolutionTest";
     CHECK(RegisterClassA(&wc));
@@ -89,6 +122,46 @@ int main(void) {
         s_pvideo_active=1;display_draw_content(hwnd,dc,&bi);
         CHECK(GetPixel(dc,300,200)==RGB(0,0,255));
         s_pvideo_active=0;s_high_draw_width=s_high_draw_height=0;s_high_rgb=NULL;
+        /* Keep the old complete blue background while a publisher holds the
+         * lock for longer than a normal UI update. Menu pixels remain fresh;
+         * world diagnostics must not run against an unowned camera snapshot. */
+        xbox_MenuOverlayUpdateRegister(menu_update);
+        xbox_MenuOverlayRegister(menu_draw,menu_key,NULL);
+        xbox_DebugWorldRegister(world_draw);
+        display_present(hwnd,dc,&bi);
+        CHECK(world_draws==1);
+        publication_ready=CreateEvent(NULL,TRUE,FALSE,NULL);
+        publication_release=CreateEvent(NULL,TRUE,FALSE,NULL);
+        HANDLE publisher=CreateThread(NULL,0,hold_publication,NULL,0,NULL);
+        CHECK(publisher && WaitForSingleObject(publication_ready,1000)==WAIT_OBJECT_0);
+        ULONGLONG started=GetTickCount64();
+        while(GetTickCount64()-started<1000)
+        {
+            PostMessage(hwnd,WM_KEYDOWN,VK_DOWN,0);
+            PostMessage(hwnd,WM_KEYUP,VK_DOWN,0);
+            MSG message;
+            while (PeekMessage(&message,NULL,0,0,PM_REMOVE))
+            {
+                TranslateMessage(&message);
+                DispatchMessage(&message);
+            }
+            window_update_input();
+            display_present(hwnd,dc,&bi);
+            Sleep(16);
+        }
+        CHECK(GetTickCount64()-started<1300 && input_updates>=20 && overlay_draws>=20 && keyboard_events>=20);
+        CHECK(world_draws==1 && !s_high_rgb);
+        RECT cached_view=display_view(hwnd);
+        int menu_x=cached_view.left+MulDiv(100,cached_view.right-cached_view.left,640);
+        int menu_y=cached_view.top+MulDiv(100,cached_view.bottom-cached_view.top,480);
+        CHECK(GetPixel(dc,menu_x,menu_y)==RGB(0,255,0));
+        CHECK(GetPixel(dc,300,200)==RGB(0,0,255));
+        SetEvent(publication_release);CHECK(WaitForSingleObject(publisher,1000)==WAIT_OBJECT_0);
+        CloseHandle(publisher);CloseHandle(publication_ready);CloseHandle(publication_release);
+        display_present(hwnd,dc,&bi);CHECK(world_draws==2);
+        xbox_MenuOverlayUpdateRegister(NULL);xbox_MenuOverlayRegister(NULL,NULL,NULL);
+        xbox_DebugWorldRegister(NULL);
+        release_canvas(&s_base_canvas);release_canvas(&s_menu_canvas);
         free(s_rgb);s_rgb=NULL;_putenv_s("RECOMP_PVIDEO_OVERLAY","");
         SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);
     }
@@ -187,6 +260,15 @@ int main(void) {
     title_display_frame();CHECK(s_open==2 && s_options && !(MEM8(0x2014)&1));
     CHECK(!(MEM8(0x7014)&1) && !(MEM8(0x710C)&1) && MEMF(0x8020)==112);
     MEM8(0x7014)=1;title_display_frame();CHECK(MEM8(0x7014)&1); /* Native blink owns visibility. */
+    /* The real settings consumer must drain both Down taps before Confirm. */
+    menu_fixture[0]=XINPUT_GAMEPAD_DPAD_DOWN;
+    menu_fixture[1]=XINPUT_GAMEPAD_DPAD_DOWN;
+    menu_fixture[2]=XINPUT_GAMEPAD_A;
+    menu_fixture_count=3;menu_fixture_next=0;
+    display_input();
+    CHECK(s_selection==2 && !xbox_DisplayDynamicPrompts() && menu_fixture_next==3);
+    display_key(VK_RETURN);CHECK(xbox_DisplayDynamicPrompts());
+    s_selection=0;menu_fixture_count=menu_fixture_next=0;
     display_key(VK_DOWN);CHECK(s_selection==1);
     CHECK(xbox_DisplayMouseInteraction());display_key(VK_RETURN);CHECK(!xbox_DisplayMouseInteraction());
     CHECK(GetPrivateProfileIntW(L"Display",L"MouseInteraction",1,config)==0);
@@ -234,7 +316,7 @@ int main(void) {
     MEM8(0x2314)=0;title_display_frame();CHECK(!(MEM8(0x2514)&1) && !(MEM32(0x25F0)&8));
     s_fb_running=1;CHECK(!title_display_native_event(0x2500,63) && s_fb_running==1);s_fb_running=0;
     DeleteFileW(config);DestroyWindow(hwnd);
-    puts("Passed: exact client sizes, saved selection, 4:3 scaling, scaled mouse coordinates, capture ownership and main/pause Options gating.");
+    puts("Passed: exact client sizes, saved selection, 4:3 scaling, scaled mouse coordinates, capture ownership, main/pause Options gating and responsive menus during a blocked publisher.");
     return 0;
 }
 '''

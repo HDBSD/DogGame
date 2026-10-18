@@ -20,6 +20,7 @@ prefix = r'''
 static unsigned char memory[0x4000000];
 #define MEM32(address) (*(uint32_t *)(memory + (address)))
 #define MEM8(address) memory[(address)]
+#define MEMF(address) (*(float *)(memory + (address)))
 '''
 checks = r'''
 #define CHECK(condition) do { if (!(condition)) { fprintf(stderr, "Failed line %d: %s\n", __LINE__, #condition); return 1; } } while (0)
@@ -97,6 +98,20 @@ int main(void)
     MEM32(0x4000000 - 4) = 0x41;
     remap_controller_press_edges(BUTTON_START, BUTTON_BACK);
     CHECK(MEM32(0x4000000 - 4) == 0x41);
+    /* Diagnostic snapshots must copy without consuming native edges. */
+    MEM32(0x1BEF10) = 0x40000;
+    MEM32(0x4002C) = 0x40;
+    MEM32(0x40030) = 0x40;
+    MEMF(0x1A4F14) = 0.0f;
+    MEMF(0x1A5220) = 0.016f;
+    MEMF(0x18131C) = 0.00001f;
+    TitleMenuInputSnapshot observation;
+    CHECK(title_menu_input_snapshot(&observation));
+    CHECK(observation.held == 0x40 && observation.pressed == 0x40);
+    CHECK(observation.main_elapsed == 0.0f && observation.save_elapsed == 0.016f);
+    CHECK(observation.ui_minimum_elapsed == 0.00001f && MEM32(0x40030) == 0x40);
+    MEM32(0x1BEF10) = 0;
+    CHECK(!title_menu_input_snapshot(&observation) && !observation.held && !observation.pressed);
     puts("Passed: menu gating, map listeners, press-edge remapping, all controller slots, held state and guest bounds.");
     return 0;
 }
