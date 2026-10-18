@@ -155,7 +155,10 @@ the log. Include the level, action immediately before the problem, and whether
 music, speech, effects or all audio were affected. Debug mode also records
 XAudio2 queue/underrun statistics every five seconds. The text capture records
 active hardware/software voice state at the trigger and during the following
-ten seconds. The WAV is the mixed signal before Windows playback: if it sounds
+ten seconds. The companion report also includes XAudio2 queue depth, samples
+played, underruns, full-queue drops, submission/start failures and the last
+recorded error. Each snapshot includes the mixed frame's peak and count of
+samples at the 16-bit limits. Saturation alone does not identify its source. The WAV is the mixed signal before Windows playback: if it sounds
 normal while the live output was corrupted, investigate the output backend or
 device; if it contains the corruption, investigate voice data, decoding or
 mixing. Clipping alone does not prove memory corruption.

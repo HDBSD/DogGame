@@ -38,6 +38,7 @@ static int                     g_xa2_frames_written = 0;
 static int                     g_xa2_started = 0;
 static unsigned                g_xa2_underruns, g_xa2_full, g_xa2_failures;
 static DWORD                   g_xa2_stats_time;
+static HRESULT                 g_xa2_last_error;
 
 int xa2_init(void)
 {
@@ -87,12 +88,14 @@ int xa2_init(void)
     g_xa2_started = 0;
     g_xa2_underruns = g_xa2_full = g_xa2_failures = 0;
     g_xa2_stats_time = GetTickCount();
+    g_xa2_last_error = S_OK;
 
     fprintf(stderr, "[XA2] XAudio2 initialized (%d Hz stereo 16-bit, %d x %d-sample buffers)\n",
             XA2_SAMPLE_RATE, XA2_NUM_BUFS, XA2_BUF_SAMPLES);
     return 1;
 
 fail:
+    g_xa2_last_error = hr;
     xa2_shutdown();
     /* Failed initialization still runs on the COM-initializing thread. */
     if (com_initialized) CoUninitialize();
@@ -167,7 +170,7 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
     xbuf.pAudioData = (const BYTE *)g_xa2_bufs[idx];
 
     hr = IXAudio2SourceVoice_SubmitSourceBuffer(g_xa2_source, &xbuf, NULL);
-    if (FAILED(hr)) { g_xa2_failures++; return 0; }
+    if (FAILED(hr)) { g_xa2_last_error = hr; g_xa2_failures++; return 0; }
 
     g_xa2_next_buf = (idx + 1) % XA2_NUM_BUFS;
     g_xa2_frames_written++;
@@ -175,9 +178,27 @@ int xa2_submit_samples(const int16_t *samples, int num_samples)
     if (!g_xa2_started && state.BuffersQueued >= 1) {
         hr = IXAudio2SourceVoice_Start(g_xa2_source, 0, XAUDIO2_COMMIT_NOW);
         if (SUCCEEDED(hr)) g_xa2_started = 1;
-        else g_xa2_failures++;
+        else { g_xa2_last_error = hr; g_xa2_failures++; }
     }
     return 1;
+}
+
+void xa2_write_diagnostics(FILE *destination)
+{
+    if (!destination)
+    {
+        return;
+    }
+    XAUDIO2_VOICE_STATE state = {0};
+    if (g_xa2_source)
+    {
+        IXAudio2SourceVoice_GetState(g_xa2_source, &state, 0);
+    }
+    fprintf(destination,
+            "output active=%d started=%d queued=%u samples_played=%llu submissions=%d underruns=%u full=%u failures=%u last_error=%08lX\n",
+            g_xa2_initialized, g_xa2_started, state.BuffersQueued,
+            (unsigned long long)state.SamplesPlayed, g_xa2_frames_written,
+            g_xa2_underruns, g_xa2_full, g_xa2_failures, (unsigned long)g_xa2_last_error);
 }
 
 int xa2_get_buffer_size(void)
@@ -192,5 +213,9 @@ void xa2_shutdown(void)                               {}
 int  xa2_is_active(void)                              { return 0; }
 int  xa2_submit_samples(const int16_t *s, int n)      { (void)s; (void)n; return 0; }
 int  xa2_get_buffer_size(void)                        { return 0; }
+void xa2_write_diagnostics(FILE *destination)
+{
+    if (destination) fprintf(destination, "output XAudio2=unavailable\n");
+}
 
 #endif /* _WIN32 */

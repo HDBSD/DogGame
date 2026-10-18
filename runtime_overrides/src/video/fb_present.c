@@ -951,6 +951,68 @@ static void display_present(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
     }
 }
 
+/* Window-only 60 Hz cadence. Drawing consumes the interval's budget rather
+ * than adding to a fixed sleep. The timer can remain precise when Windows
+ * relaxes the process-wide timer resolution for an occluded window. */
+typedef struct WindowRefreshClock
+{
+    HANDLE timer;
+    LONGLONG frequency, deadline, phase;
+} WindowRefreshClock;
+
+static void window_refresh_initialize(WindowRefreshClock *clock)
+{
+    LARGE_INTEGER frequency, now;
+    QueryPerformanceFrequency(&frequency);
+    QueryPerformanceCounter(&now);
+    clock->frequency = frequency.QuadPart;
+    clock->deadline = now.QuadPart;
+    clock->phase = 0;
+    /* HIGH_RESOLUTION is supported by newer Windows versions. Older hosts
+     * reject the flag; retain the ordinary waitable-timer fallback there. */
+    clock->timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002u, TIMER_ALL_ACCESS);
+    if (!clock->timer)
+    {
+        clock->timer = CreateWaitableTimerW(NULL, FALSE, NULL);
+    }
+}
+
+static void window_refresh_wait(WindowRefreshClock *clock)
+{
+    LARGE_INTEGER now, due;
+    QueryPerformanceCounter(&now);
+    clock->deadline += clock->frequency / 60;
+    clock->phase += clock->frequency % 60;
+    if (clock->phase >= 60)
+    {
+        clock->deadline++;
+        clock->phase -= 60;
+    }
+    LONGLONG remaining = clock->deadline - now.QuadPart;
+    if (remaining <= 0)
+    {
+        if (-remaining > clock->frequency / 60)
+        {
+            clock->deadline = now.QuadPart;
+            clock->phase = 0;
+        }
+        return;
+    }
+    due.QuadPart = -(remaining * 10000000 / clock->frequency);
+    if (!due.QuadPart)
+    {
+        due.QuadPart = -1;
+    }
+    if (clock->timer && SetWaitableTimer(clock->timer, &due, 0, NULL, NULL, FALSE))
+    {
+        WaitForSingleObject(clock->timer, INFINITE);
+    }
+    else
+    {
+        Sleep((DWORD)((remaining * 1000 + clock->frequency - 1) / clock->frequency));
+    }
+}
+
 static DWORD WINAPI fb_thread(LPVOID unused)
 {
     HWND hwnd;
@@ -1002,6 +1064,8 @@ static DWORD WINAPI fb_thread(LPVOID unused)
     fprintf(stderr, "  [FBWIN] framebuffer window open (%ux%u)\n",
             s_fb_width, s_fb_height);
 
+    WindowRefreshClock refresh_clock;
+    window_refresh_initialize(&refresh_clock);
     while (InterlockedCompareExchange(&s_fb_running, 1, 1) == 1) {
         MSG msg;
         while (PeekMessageA(&msg, NULL, 0, 0, PM_REMOVE)) {
@@ -1053,7 +1117,11 @@ static DWORD WINAPI fb_thread(LPVOID unused)
                 t0 = now; f0 = f;
             }
         }
-        Sleep(16);
+        window_refresh_wait(&refresh_clock);
+    }
+    if (refresh_clock.timer)
+    {
+        CloseHandle(refresh_clock.timer);
     }
 
     cursor_release();

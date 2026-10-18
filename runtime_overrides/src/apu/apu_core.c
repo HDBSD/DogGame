@@ -82,6 +82,21 @@ static void audio_capture_snapshot(MCPXAPUState *d, const char *phase)
     fprintf(audio_capture_state, "%s tick=%lu backend=%s muted=%d ep_frame=%u\n",
             phase, GetTickCount(), xa2_is_active() ? "XAudio2" : "waveOut",
             g_audio_muted, (unsigned)d->ep_frame_div);
+    xa2_write_diagnostics(audio_capture_state);
+    unsigned peak = 0, saturated = 0;
+    unsigned frames = sizeof(d->monitor.frame_buf) / sizeof(d->monitor.frame_buf[0]);
+    for (unsigned frame = 0; frame < frames; frame++)
+    {
+        for (unsigned channel = 0; channel < 2; channel++)
+        {
+            int sample = d->monitor.frame_buf[frame][channel];
+            unsigned magnitude = (unsigned)(sample < 0 ? -sample : sample);
+            if (magnitude > peak) peak = magnitude;
+            if (sample == -32768 || sample == 32767) saturated++;
+        }
+    }
+    fprintf(audio_capture_state, "mixed-frame peak=%u saturated=%u samples=%u\n",
+            peak, saturated, frames * 2);
     for (int i = 0; i < 256; ++i) {
         const struct McpxApuDebugVoice *v = &g_dbg.vp.v[i];
         if (v->active)
