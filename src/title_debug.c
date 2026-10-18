@@ -12,6 +12,7 @@
 #include <xbox/host_gamepad.h>
 #include <xbox/debug_overlay.h>
 #include <xbox/display_options.h>
+#include <xbox/audio_capture.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -34,7 +35,8 @@ typedef enum TitleDebugAction
     DEBUG_ACTION_TOGGLE_SNACK_REQUIREMENT = 10,
     DEBUG_ACTION_GRANT_SNACKS = 11,
     DEBUG_ACTION_TOGGLE_TRIGGERS = 12,
-    DEBUG_ACTION_TOGGLE_COLLISION = 13
+    DEBUG_ACTION_TOGGLE_COLLISION = 13,
+    DEBUG_ACTION_TRACE_AUDIO = 14
 } TitleDebugAction;
 
 static volatile LONG s_pause, s_open, s_selection, s_level_selection, s_power_selection;
@@ -51,13 +53,19 @@ static const unsigned s_power_bit[] = {0, 1, 2, 3, 4, 5, 6, 9, 10, 11, 12, 13, 1
 enum
 {
     POWER_COUNT = 13,
-    DEBUG_ROWS = 14
+    DEBUG_ROWS = 15
 };
 
 volatile LONG title_debug_ignore_warp, title_debug_ignore_snacks;
 volatile LONG title_debug_monster_safe, title_debug_noclip;
 static DWORD s_trace_until, s_profile_until;
 static volatile LONG s_pending_capture;
+enum
+{
+    DEBUG_CAPTURE_PROFILE = 1,
+    DEBUG_CAPTURE_RENDER_TRACE = 2,
+    DEBUG_CAPTURE_AUDIO = 3
+};
 static DWORD s_capture_until;
 /* Keep short taps across slow frames; this cursor never consumes guest input. */
 static HostGamepadMenuReader s_menu_input;
@@ -254,6 +262,10 @@ static int debug_key(unsigned key)
         {
             queue_action(DEBUG_ACTION_TOGGLE_COLLISION, 0);
         }
+        else if (row == 13)
+        {
+            queue_action(DEBUG_ACTION_TRACE_AUDIO, 0);
+        }
         else
         {
             close_debug();
@@ -336,6 +348,46 @@ static void debug_input(void)
     }
 }
 
+/* Window-thread UI observes copied APU progress only. File handling and audio
+ * buffers stay on the APU thread; completion notices expire after five seconds. */
+static void draw_audio_capture_status(HDC dc, DWORD now)
+{
+    static AudioCaptureStatus previous;
+    static DWORD notice_until;
+    unsigned remaining;
+    AudioCaptureStatus status = apu_debug_audio_status(&remaining);
+    if (status != previous)
+    {
+        previous = status;
+        notice_until = now + 5000;
+    }
+    char text[160];
+    if (status == AUDIO_CAPTURE_REQUESTED)
+    {
+        snprintf(text, sizeof text, "Audio trace requested: waiting for audio processing");
+    }
+    else if (status == AUDIO_CAPTURE_RECORDING)
+    {
+        snprintf(text, sizeof text, "Audio trace recording: %u s remaining -> audio-capture-*.wav / .txt",
+                 (remaining + 999) / 1000);
+    }
+    else if (status == AUDIO_CAPTURE_COMPLETE && (LONG)(notice_until - now) > 0)
+    {
+        snprintf(text, sizeof text, "Audio trace saved -> audio-capture-*.wav / .txt");
+    }
+    else if (status == AUDIO_CAPTURE_FAILED && (LONG)(notice_until - now) > 0)
+    {
+        snprintf(text, sizeof text, "Audio trace failed: see debug-render.log");
+    }
+    else
+    {
+        return;
+    }
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 230, 70));
+    draw_debug_text(dc, 12, 82, text);
+}
+
 static void debug_draw(void *device, unsigned width, unsigned height)
 {
     HDC dc = (HDC)device;
@@ -343,9 +395,12 @@ static void debug_draw(void *device, unsigned width, unsigned height)
     {
         SetBkMode(dc, TRANSPARENT);
         SetTextColor(dc, RGB(255, 230, 70));
-        draw_debug_text(dc, 12, 62, "Capture armed: close Pause to start recording gameplay");
+        draw_debug_text(dc, 12, 62, s_pending_capture == DEBUG_CAPTURE_AUDIO
+            ? "Audio trace armed: close Pause to start recording gameplay"
+            : "Capture armed: close Pause to start recording gameplay");
     }
     DWORD now = GetTickCount();
+    draw_audio_capture_status(dc, now);
     if ((s_trace_until && (LONG)(s_trace_until - now) > 0) ||
         (s_profile_until && (LONG)(s_profile_until - now) > 0))
     {
@@ -390,7 +445,8 @@ static void debug_draw(void *device, unsigned width, unsigned height)
     snprintf(rows[10], 160, "Add 100 snacks");
     snprintf(rows[11], 160, "Show triggers: %s", title_debug_geometry_enabled(0) ? "ON" : "OFF");
     snprintf(rows[12], 160, "World collision view: %s", title_debug_geometry_enabled(1) ? "ON" : "OFF");
-    snprintf(rows[13], 160, "Return to pause menu");
+    snprintf(rows[13], 160, "Capture 10 second audio trace (after unpausing)");
+    snprintf(rows[14], 160, "Return to pause menu");
     int visible = ((int)height - 230) / 21;
     if (visible < 1)
     {
@@ -517,6 +573,36 @@ int title_debug_boot(void)
     return 1;
 }
 
+static void arm_gameplay_capture(LONG capture)
+{
+    InterlockedExchange(&s_pending_capture, capture);
+    close_debug();
+}
+
+static void start_pending_gameplay_capture(void)
+{
+    if (title_state_menu_mode() != 11 || !s_pending_capture)
+    {
+        return;
+    }
+    LONG capture = InterlockedExchange(&s_pending_capture, 0);
+    if (capture == DEBUG_CAPTURE_PROFILE)
+    {
+        nv2a_debug_profile_request();
+        s_profile_until = GetTickCount() + 10000;
+    }
+    else if (capture == DEBUG_CAPTURE_RENDER_TRACE)
+    {
+        nv2a_debug_trace_seconds_request(10);
+        s_trace_until = GetTickCount() + 10000;
+    }
+    else if (capture == DEBUG_CAPTURE_AUDIO)
+    {
+        apu_debug_audio_request();
+        fprintf(stderr, "[AUDIO-CAPTURE] Debug menu requested after unpausing.\n");
+    }
+}
+
 void title_debug_frame(void)
 {
     title_display_frame();
@@ -531,27 +617,13 @@ void title_debug_frame(void)
         int f8 = xbox_FramebufferFocused() && xbox_FramebufferKeyDown(VK_F8);
         if (f8 && !last_f8)
         {
-            extern void apu_debug_audio_request(void);
             apu_debug_audio_request();
             fprintf(stderr, "[AUDIO-CAPTURE] F8 requested; scene mode=%u\n", title_state_menu_mode());
         }
         last_f8 = f8;
     }
     InterlockedExchange(&s_pause, title_state_menu_mode() == 7);
-    if (title_state_menu_mode() == 11 && s_pending_capture)
-    {
-        LONG capture = InterlockedExchange(&s_pending_capture, 0);
-        if (capture == 1)
-        {
-            nv2a_debug_profile_request();
-            s_profile_until = GetTickCount() + 10000;
-        }
-        else
-        {
-            nv2a_debug_trace_seconds_request(10);
-            s_trace_until = GetTickCount() + 10000;
-        }
-    }
+    start_pending_gameplay_capture();
     InterlockedExchange(&s_power_bits, title_state_player_powers());
     static uint32_t last_health;
     uint32_t health = title_state_player_health();
@@ -614,8 +686,7 @@ void title_debug_frame(void)
     }
     else if (action == DEBUG_ACTION_PROFILE_RENDERER)
     {
-        InterlockedExchange(&s_pending_capture, 1);
-        close_debug();
+        arm_gameplay_capture(DEBUG_CAPTURE_PROFILE);
     }
     else if (action == DEBUG_ACTION_TOGGLE_FPS_GRAPH)
     {
@@ -624,8 +695,11 @@ void title_debug_frame(void)
     }
     else if (action == DEBUG_ACTION_TRACE_TEN_SECONDS)
     {
-        InterlockedExchange(&s_pending_capture, 2);
-        close_debug();
+        arm_gameplay_capture(DEBUG_CAPTURE_RENDER_TRACE);
+    }
+    else if (action == DEBUG_ACTION_TRACE_AUDIO)
+    {
+        arm_gameplay_capture(DEBUG_CAPTURE_AUDIO);
     }
     else if (action == DEBUG_ACTION_TOGGLE_TRIGGERS || action == DEBUG_ACTION_TOGGLE_COLLISION)
     {

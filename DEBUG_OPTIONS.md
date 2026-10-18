@@ -30,6 +30,7 @@ Run `DogGame.exe` from `SD100F/build/Release`, where its `game` and `saves` fold
 | `--level <ID>` | Start directly in a level using its four-character scene ID, such as `H001` or `W020`. Requires `--debug`. IDs are case insensitive and must have installed HIP data. Direct H001 startup also skips its opening `cin1` movie. |
 | `--loadsaveslot <1-3>` | Restore a save and enter its saved level. Requires `--debug`. Combined with `--level`, restore saved progress first, then enter the requested level. An unavailable save falls back to the menu and records an error in the debug log. |
 | `--trace` | Request one frame trace at startup. Requires `--debug`. |
+| `--vulkan` | Select the experimental Vulkan renderer. Requires `--debug`; ordinary launches retain D3D11. See [VULKAN_RENDERER.md](VULKAN_RENDERER.md) for limits. |
 | `--profiler` | Start a ten-second renderer timing capture. Requires `--debug`. |
 | `--fpsgraph` | Start with the FPS/frame-time graph visible. Requires `--debug`. |
 | `--help` | Show argument help. |
@@ -150,6 +151,13 @@ ten seconds before the keypress and ten seconds afterward, at 48 kHz stereo.
 Repeated requests during a capture are ignored; another capture can be made
 after completion. Normal non-debug launches do not retain this audio history.
 
+You can also select **Capture 10 second audio trace (after unpausing)** in the
+Debug menu. It arms the capture while paused and starts the following ten
+seconds when gameplay resumes. The existing pre-trigger history is retained.
+Both this action and F8 show an on-screen recording countdown, followed by a
+five-second saved/failed notice. The countdown follows processed audio frames;
+if audio processing stalls, it does not falsely report that recording finished.
+
 Send both capture files and `debug-render.log` before the next launch overwrites
 the log. Include the level, action immediately before the problem, and whether
 music, speech, effects or all audio were affected. Debug mode also records
@@ -165,6 +173,12 @@ mixing. Clipping alone does not prove memory corruption.
 
 
 Recomp Settings includes **30 FPS cap** (OFF by default). ON limits guest frame presentation to 30 FPS without changing the refresh clock or simulation timestep. It cannot raise low FPS. The setting persists as `FpsCap30` in `display.ini`.
+
+**Pause on focus loss** defaults to ON and is saved as `PauseOnFocusLoss` in
+the `[Display]` section of `display.ini`. Switching to another window requests
+the game's normal pause action during gameplay. Existing menus and cutscenes
+are left alone; returning focus does not automatically resume. Turn the option
+OFF to keep gameplay running when the window loses focus.
 
 ### Renderer comparison switches
 

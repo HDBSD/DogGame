@@ -21,6 +21,34 @@
 
 #include "apu_state.h"
 #include "fpconv.h"
+#include "apu_signal_meter.h"
+
+static ApuSignalMeter s_source_meter[MCPX_HW_MAX_VOICES];
+static ApuSignalMeter s_filter_meter[MCPX_HW_MAX_VOICES];
+static ApuSignalMeter s_output_meter[MCPX_HW_MAX_VOICES];
+static uint64_t s_idle_traps;
+static uint64_t s_deferred_idle_voices;
+
+void mcpx_apu_vp_write_signal_diagnostics(FILE *file)
+{
+    fprintf(file, "vp-traversal idle_traps=%llu deferred_idle=%llu\n",
+            (unsigned long long)s_idle_traps,
+            (unsigned long long)s_deferred_idle_voices);
+    s_idle_traps = 0;
+    s_deferred_idle_voices = 0;
+    for (unsigned v = 0; v < MCPX_HW_MAX_VOICES; v++)
+    {
+        if (!s_source_meter[v].samples && !s_output_meter[v].samples)
+        {
+            continue;
+        }
+        fprintf(file, "vp-signal=%u", v);
+        apu_signal_meter_write(file, "source", &s_source_meter[v]);
+        apu_signal_meter_write(file, "filter", &s_filter_meter[v]);
+        apu_signal_meter_write(file, "output", &s_output_meter[v]);
+        fputc('\n', file);
+    }
+}
 
 /* #define DEBUG_MCPX */
 
@@ -766,6 +794,20 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
     bool persist = voice_get_mask(d, (uint16_t)v, NV_PAVS_VOICE_CFG_FMT,
                                   NV_PAVS_VOICE_CFG_FMT_PERSIST) != 0;
 
+    /* Snapshot the actual voice layout being read, not zero-initialized debug
+     * fields. Stream segment overrides are reported separately below. */
+    struct McpxApuDebugVoice *dbg = &g_dbg.vp.v[v];
+    dbg->stream = stream;
+    dbg->loop = loop;
+    dbg->persist = persist;
+    dbg->ebo = ebo;
+    dbg->cbo = cbo;
+    dbg->lbo = lbo;
+    dbg->ba = ba;
+    dbg->container_size = container_size_index;
+    dbg->sample_size = sample_size;
+    dbg->samples_per_block = samples_per_block;
+
     int ssl_index = 0, ssl_seg = 0, page = 0, count = 0;
     int seg_len = 0, seg_cs = 0, seg_spb = 0, seg_s = 0;
     hwaddr segment_offset = 0;
@@ -821,11 +863,22 @@ static int voice_get_samples(MCPXAPUState *d, uint32_t v, float samples[][2],
         seg_spb = (segment_length >> 18) & 0x1f;
         seg_s = (segment_length >> 23) & 1;
         container_size_index = seg_cs;
+        /* The segment overrides the container selector. Recompute its byte
+         * width too: retaining the voice width walks PCM at the wrong stride.
+         * Check-AudioVoiceSamples reproduces this with a byte-sized voice
+         * followed by a 16-bit PCM segment. This is code/fixture evidence,
+         * not a recovered explanation for the reported E007 corruption.
+         * Segment channel/block overrides remain unverified. */
+        container_size = container_sizes[container_size_index];
         if (seg_cs == NV_PAVS_VOICE_CFG_FMT_CONTAINER_SIZE_ADPCM) {
             sample_size = NV_PAVS_VOICE_CFG_FMT_SAMPLE_SIZE_S24;
         }
         assert(seg_len > 0);
         ebo = seg_len - 1;
+        dbg->ba = (uint32_t)segment_offset;
+        dbg->ebo = ebo;
+        dbg->container_size = container_size_index;
+        dbg->sample_size = sample_size;
     }
 
     bool adpcm =
@@ -1089,6 +1142,16 @@ static void voice_process(MCPXAPUState *d,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE);
     if (!active) return;
 
+    int meter_enabled = apu_signal_meter_enabled();
+    if (meter_enabled)
+    {
+        for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
+        {
+            apu_signal_meter_sample(&s_source_meter[v], samples[i][0]);
+            apu_signal_meter_sample(&s_source_meter[v], samples[i][1]);
+        }
+    }
+
     /* Get volume bins */
     int bin[8];
     bin[0] = voice_get_mask(d, v, NV_PAVS_VOICE_CFG_VBIN, NV_PAVS_VOICE_CFG_VBIN_V0BIN);
@@ -1151,6 +1214,10 @@ static void voice_process(MCPXAPUState *d,
             setup_svf(filter, fc_f, q_f, F_LP);
             for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
                 samples[i][ch] = run_svf(filter, samples[i][ch]);
+                if (meter_enabled)
+                {
+                    apu_signal_meter_sample(&s_filter_meter[v], samples[i][ch]);
+                }
                 samples[i][ch] = fminf(fmaxf(samples[i][ch], -1.0f), 1.0f);
             }
         }
@@ -1163,6 +1230,15 @@ static void voice_process(MCPXAPUState *d,
                                      NV_PAVS_VOICE_CFG_HRTF_TARGET_HANDLE);
         if (hrtf_handle != HRTF_NULL_HANDLE) {
             hrtf_filter_process(&d->vp.filters[v].hrtf, samples, samples);
+        }
+    }
+
+    if (meter_enabled)
+    {
+        for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++)
+        {
+            apu_signal_meter_sample(&s_output_meter[v], samples[i][0]);
+            apu_signal_meter_sample(&s_output_meter[v], samples[i][1]);
         }
     }
 
@@ -1209,6 +1285,10 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
                         float mixbins[NUM_MIXBINS][NUM_SAMPLES_PER_FRAME])
 {
     memset(d->vp.sample_buf, 0, sizeof(d->vp.sample_buf));
+    for (unsigned v = 0; v < MCPX_HW_MAX_VOICES; v++)
+    {
+        g_dbg.vp.v[v].active = false;
+    }
 
     for (int list = 0; list < 3; list++) {
         hwaddr top, current, next;
@@ -1230,13 +1310,26 @@ void mcpx_apu_vp_frame(MCPXAPUState *d,
 
             if (!voice_get_mask(d, v, NV_PAVS_VOICE_PAR_STATE,
                                 NV_PAVS_VOICE_PAR_STATE_ACTIVE_VOICE)) {
-                fe_method(d, SE2FE_IDLE_VOICE, v);
-                /* A trapped method belongs to this voice until the guest
-                 * services it. Continuing the lists overwrites FEDECPARAM
-                 * and can report a different voice to DirectSound. */
+                /* Preserve the first pending FE method until the guest
+                 * services it. Deferring another idle notification must not
+                 * discard the rest of this host audio block: se_frame still
+                 * advances and submits its output even with a pending trap.
+                 * Check-AudioVoiceTraversal reproduces the old 32-sample
+                 * dropout and checks ownership across all three voice lists.
+                 * This is host scheduling policy, not a recovered MCPX rule. */
                 if ((d->regs[NV_PAPU_FECTL] & NV_PAPU_FECTL_FEMETHMODE)
-                        == NV_PAPU_FECTL_FEMETHMODE_TRAPPED)
-                    return;
+                        != NV_PAPU_FECTL_FEMETHMODE_TRAPPED)
+                {
+                    fe_method(d, SE2FE_IDLE_VOICE, v);
+                    if (apu_signal_meter_enabled())
+                    {
+                        s_idle_traps++;
+                    }
+                }
+                else if (apu_signal_meter_enabled())
+                {
+                    s_deferred_idle_voices++;
+                }
             } else {
                 /* Process voice directly (single-threaded) */
                 voice_process(d, mixbins, d->vp.sample_buf, v, list);
@@ -1277,6 +1370,11 @@ void mcpx_apu_vp_finalize(MCPXAPUState *d)
 
 void mcpx_apu_vp_reset(MCPXAPUState *d)
 {
+    memset(s_source_meter, 0, sizeof(s_source_meter));
+    memset(s_filter_meter, 0, sizeof(s_filter_meter));
+    memset(s_output_meter, 0, sizeof(s_output_meter));
+    s_idle_traps = 0;
+    s_deferred_idle_voices = 0;
     d->vp.ssl_base_page = 0;
     d->vp.hrtf_headroom = 0;
     memset(d->vp.ssl, 0, sizeof(d->vp.ssl));

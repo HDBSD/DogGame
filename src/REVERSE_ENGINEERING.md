@@ -108,3 +108,35 @@ Native clock loss reproduced: the edge-only timing probe at host tick 233230171 
 The host KeTickCount publication used GetTickCount while its existing bridge contract declares a 1 ms clock. `guest_clock.c` now derives elapsed milliseconds from QPC while retaining an uptime epoch, shared with KeQueryInterruptTime. Clock initialization and publication remain host-owned; no guest ABI/instruction ordering changes. A repeated navigation probe reduced observed zero-delta press edges from 1/27 to 0/28. This corrects a reproduced failure path, not proof that every physical miss or Load/Save case is resolved. The user's marked three Down presses lack timing fields, so their individual delta values remain unknown. See CONTROLLERS.md for reproducible tests and limits.
 
 FMV presentation investigation (18 October 2026): inspection of the maintained host window loop established that a fixed sleep was added after conversion/drawing. The window now schedules drawing within QPC-based 60 Hz deadlines, with window-owned waitable-timer cleanup and stall recovery. This changes host presentation only; the translated XMV decoder and guest field-clock policy remain unchanged. A private cin1-as-logo probe showed a modest increase in observed PVIDEO content updates, without establishing a fix for the reported stutter. See FMV_INVESTIGATION.md for translated routine references, experiments, evidence limits and outstanding playback validation.
+
+Experimental Vulkan backend (18 October 2026): explicit `--debug --vulkan` selects a second host implementation behind the maintained `nv_gpu_*` packet-executor API. The backend uses existing decoded geometry, texture callbacks and combiner state, with shaders derived from the retained D3D11 HLSL. No fresh Ghidra recovery, high-level game-renderer replacement, generated translation edit or guest ABI change is claimed. Queue/resource ownership, guest publication boundaries, shader provenance, real-driver pixel tests, title/H001 smoke probes and remaining presentation/Linux/performance limits are recorded in VULKAN_RENDERER.md.
+
+Vulkan performance follow-up: real H001 timing separated CPU publication from GPU fence waits and found scalar reads of uncached mapped memory dominating the first implementation. Readback now uses a separate allocation that prefers host-cached memory, invalidates noncoherent mappings after completion, and bulk-copies linear color rows. Animated texture updates replace lookup entries while retaining old images until their submission fence completes. These are host resource/ownership optimizations, not guest reconstruction. VULKAN_RENDERER.md records baseline/optimized timing, scene-specific FPS samples, forced fallback tests and hardware validation limits.
+
+Vulkan submission overlap: completed command chunks now enter the existing graphics queue before the CPU finishes later draws. The final same-queue fence still precedes guest publication and resource reuse. Full clears mirror the existing executor CPU-clear contract and preserve unrelated dirty attachments; mismatched/partial clears remain conservative. Real-driver tests cover multiple submissions without host waits, deferred publication, old texture lifetime, clear ordering and post-clear CPU edits. Per-reason wait counters and H001 measurements are recorded in VULKAN_RENDERER.md; this is host scheduling work, not new guest-function recovery.
+
+Vulkan render-pass grouping: compatible decoded batches now remain in a shared host render pass, preserving fixed-function color/depth order while removing per-batch whole-pipeline barriers. The backend closes the pass before uploads, clears, target changes, submissions and guest publication. Real-driver tests verify blend/depth order, pass grouping, resource lifetime and CPU visibility; H001 wait measurements and validation limits are in VULKAN_RENDERER.md. This changes host command scheduling only and does not reconstruct or modify generated guest rendering routines.
+
+Audio follow-up (18 October 2026): maintained `apu_vp.c:voice_get_samples` applied a stream segment's container selector without updating its byte width. A synthetic mono/stereo PCM fixture reproduces the incorrect stride and verifies the correction while checking completion notifications and offsets. This is runtime source/fixture evidence, not a new recovery of guest audio routines or confirmation of the E007 corruption cause. Debug-only observation meters now distinguish resampled source, filter output before clamping, output before gain/bin routing and DSP mixdown before clipping. APU-thread reporting does not mutate guest state; XAudio2 consumption remains asynchronous. Capture evidence, window semantics, unresolved segment channel/block fields and the partial-block completion candidate are recorded in AUDIO_INVESTIGATION.md. Generated guest translations remain untouched.
+
+E006 voice traversal follow-up: a twenty-second capture has paired waveform discontinuities separated by exactly 32 frames. Maintained `mcpx_apu_vp_frame` returned on an idle-voice FE trap while `se_frame` continued advancing/mixing that block, suppressing later active voices. The host scheduler now defers additional idle-method dispatch while a trap is pending and continues active voices in list order. The regression fixture verifies notification ownership across blocks and guest acknowledgement, all voice lists and monitor publication. This is runtime source/fixture evidence and host policy, not a new MCPX reconstruction. AUDIO_INVESTIGATION.md records the capture's separate clipping evidence and the remaining gameplay validation limit.
+
+Pause on focus loss is custom host policy. The window thread queues an atomic
+focus-loss request; `title_display_input_frame`, at the existing post-poll
+boundary in the maintained guest-routine adapter (`loc_0005DB61`, after the
+`sub_00090F50` call), consumes it only in the existing gameplay mode 11. The
+menu adapter adds the known Start bit to player one's decoded press edges,
+preserving held state and other presses rather than forcing guest menu state.
+The controller table/layout and mode meaning are inherited from existing
+adapters, not freshly recovered. Tests check request ownership, invalid pointers,
+mode gating and press preservation; native pause acceptance and physical
+Alt-Tab/controller behavior still require gameplay validation.
+
+Vulkan internal resolution now uses physical-sized host attachments and a
+validated physical presentation snapshot while preserving native guest layout.
+Vertex constants remain in guest coordinates; host viewport/scissor and copy
+extents scale. Native readback and physical snapshot ownership are verified by
+real-driver pixel tests, including subpixel detail, retained depth, CPU edits
+and live size changes. This extends the maintained renderer API; no guest
+routine recovery or generated translation edit is involved. Implementation,
+surface eligibility and transfer/performance limits are in VULKAN_RENDERER.md.

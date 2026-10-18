@@ -1,5 +1,6 @@
 /* Experimental hardware raster path. Guest RAM remains authoritative at
  * software draws, clears, render-target switches and presentation boundaries. */
+#include "nv2a_gpu_d3d11_names.h"
 #include "nv2a_gpu.h"
 extern "C" {
 #include "../../include/xbox/display_options.h"

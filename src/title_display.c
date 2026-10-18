@@ -59,6 +59,13 @@ static void trace_native_menu_input(const char *boundary)
 
 void title_display_input_frame(void)
 {
+    /* Use the game's normal pause input after polling, so it cannot be
+     * overwritten by the poll. Ignore focus loss in menus/cutscenes and never
+     * synthesize a resume when focus returns. Window callbacks only queue. */
+    if (xbox_DisplayConsumeFocusLoss() && title_menu_current_mode() == 11)
+    {
+        title_menu_request_pause();
+    }
     trace_native_menu_input("after-poll");
     remap_start_to_back_if_needed(title_menu_current_mode());
 }
@@ -191,6 +198,10 @@ static void native_menu_frame(uint32_t scene, uint32_t mode)
 
 static volatile LONG s_options;
 static unsigned s_selection;
+enum
+{
+    RECOMP_SETTINGS_ROWS = 6
+};
 /* Keep short taps across slow frames; this cursor never consumes guest input. */
 static HostGamepadMenuReader s_menu_input;
 static DWORD s_release_at;
@@ -223,11 +234,11 @@ static int display_key(unsigned key)
         }
         else if (key == VK_UP || key == 'W' || key == VK_LEFT || key == 'A')
         {
-            s_selection = (s_selection + 4) % 5;
+            s_selection = (s_selection + RECOMP_SETTINGS_ROWS - 1) % RECOMP_SETTINGS_ROWS;
         }
         else if (key == VK_DOWN || key == 'S' || key == VK_RIGHT || key == 'D')
         {
-            s_selection = (s_selection + 1) % 5;
+            s_selection = (s_selection + 1) % RECOMP_SETTINGS_ROWS;
         }
         else if (key == VK_RETURN || key == VK_SPACE || key == 'Z')
         {
@@ -247,6 +258,10 @@ static int display_key(unsigned key)
             else if (s_selection == 3)
             {
                 xbox_DisplayFpsCapSet(!xbox_DisplayFpsCap());
+            }
+            else if (s_selection == 4)
+            {
+                xbox_DisplayPauseOnFocusLossSet(!xbox_DisplayPauseOnFocusLoss());
             }
             else
             {
@@ -332,7 +347,7 @@ static int display_click(int x, int y)
     }
     if (s_open == 2)
     {
-        if (x >= 150 && x < 560 && y >= 110 && y < 310)
+        if (x >= 150 && x < 560 && y >= 110 && y < 110 + RECOMP_SETTINGS_ROWS * 40)
         {
             s_selection = (y - 110) / 40;
             display_key(VK_RETURN);
@@ -364,7 +379,7 @@ static void display_hover(int x, int y)
     {
         if (s_open == 2)
         {
-            if (x >= 150 && x < 560 && y >= 110 && y < 310)
+            if (x >= 150 && x < 560 && y >= 110 && y < 110 + RECOMP_SETTINGS_ROWS * 40)
             {
                 s_selection = (y - 110) / 40;
             }
@@ -487,8 +502,10 @@ static void display_draw(void *device, unsigned width, unsigned height)
         const char *rows[] = {
             "Resolution", xbox_DisplayMouseInteraction() ? "Mouse interaction: ON" : "Mouse interaction: OFF",
             xbox_DisplayDynamicPrompts() ? "Dynamic button prompts: ON" : "Dynamic button prompts: OFF",
-            xbox_DisplayFpsCap() ? "30 FPS cap: ON" : "30 FPS cap: OFF", "Back  [Esc / B]"};
-        for (unsigned i = 0; i < 5; i++)
+            xbox_DisplayFpsCap() ? "30 FPS cap: ON" : "30 FPS cap: OFF",
+            xbox_DisplayPauseOnFocusLoss() ? "Pause on focus loss: ON" : "Pause on focus loss: OFF",
+            "Back  [Esc / B]"};
+        for (unsigned i = 0; i < RECOMP_SETTINGS_ROWS; i++)
         {
             SetTextColor(dc, i == s_selection ? RGB(40, 255, 0) : RGB(0, 160, 0));
             label(dc, 150, 110 + i * 40, rows[i]);

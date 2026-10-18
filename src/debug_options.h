@@ -5,7 +5,7 @@
 
 typedef struct TitleOptions
 {
-    int debug, nofmv, noaudio, save_slot, trace, profiler, fps_graph, help;
+    int debug, nofmv, noaudio, save_slot, trace, profiler, fps_graph, help, vulkan;
     char level[5];
 } TitleOptions;
 

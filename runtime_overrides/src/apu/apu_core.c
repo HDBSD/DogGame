@@ -22,6 +22,7 @@
 #include "apu_state.h"
 #include "apu.h"
 #include "apu_xaudio2.h"
+#include "../../include/xbox/audio_capture.h"
 #include "fpconv.h"
 #include "../kernel/xbox_memory_layout.h"   /* XBOX_WORKER_STACK_TOP */
 
@@ -52,6 +53,8 @@ volatile int g_audio_muted = 0;  /* 0 = audio enabled */
  * the title thread only posts a request. No recording writes until requested. */
 #define AUDIO_HISTORY_FRAMES (48000 * 10)
 static volatile LONG audio_capture_request;
+/* One atomic word keeps phase/countdown consistent across APU/UI threads. */
+static volatile LONG audio_capture_progress;
 static int16_t (*audio_history)[2];
 static unsigned audio_history_next, audio_history_count, audio_post_frames;
 static FILE *audio_capture_file, *audio_capture_state;
@@ -60,7 +63,33 @@ static int audio_diagnostic_enabled = -1;
 
 void apu_debug_audio_request(void)
 {
+    LONG observed;
+    do
+    {
+        observed = InterlockedCompareExchange(&audio_capture_progress, 0, 0);
+        unsigned phase = (unsigned)observed >> 16;
+        if (phase == AUDIO_CAPTURE_REQUESTED || phase == AUDIO_CAPTURE_RECORDING)
+        {
+            return;
+        }
+    } while (InterlockedCompareExchange(&audio_capture_progress,
+                 AUDIO_CAPTURE_REQUESTED << 16, observed) != observed);
     InterlockedExchange(&audio_capture_request, 1);
+}
+
+AudioCaptureStatus apu_debug_audio_status(unsigned *remaining_ms)
+{
+    unsigned progress = (unsigned)InterlockedCompareExchange(&audio_capture_progress, 0, 0);
+    if (remaining_ms)
+    {
+        *remaining_ms = progress & 0xFFFF;
+    }
+    return (AudioCaptureStatus)(progress >> 16);
+}
+
+static void audio_capture_publish(AudioCaptureStatus status, unsigned remaining_ms)
+{
+    InterlockedExchange(&audio_capture_progress, ((LONG)status << 16) | (remaining_ms & 0xFFFF));
 }
 
 static void audio_capture_header(FILE *f, uint32_t bytes)
@@ -92,11 +121,15 @@ static void audio_capture_snapshot(MCPXAPUState *d, const char *phase)
             int sample = d->monitor.frame_buf[frame][channel];
             unsigned magnitude = (unsigned)(sample < 0 ? -sample : sample);
             if (magnitude > peak) peak = magnitude;
-            if (sample == -32768 || sample == 32767) saturated++;
+            if (sample <= -32767 || sample == 32767) saturated++;
         }
     }
     fprintf(audio_capture_state, "mixed-frame peak=%u saturated=%u samples=%u\n",
             peak, saturated, frames * 2);
+    fprintf(audio_capture_state, "signal-window=since-previous-report-or-startup monitor=%d\n",
+            (int)d->monitor.point);
+    mcpx_apu_vp_write_signal_diagnostics(audio_capture_state);
+    mcpx_apu_dsp_write_signal_diagnostics(audio_capture_state);
     for (int i = 0; i < 256; ++i) {
         const struct McpxApuDebugVoice *v = &g_dbg.vp.v[i];
         if (v->active)
@@ -123,16 +156,31 @@ static void audio_capture_snapshot(MCPXAPUState *d, const char *phase)
 
 static void audio_capture_close(void)
 {
+    int failed = audio_post_frames != 0;
+    int had_capture = audio_capture_file != NULL;
     if (audio_capture_file) {
-        int failed = ferror(audio_capture_file);
+        failed |= ferror(audio_capture_file);
         audio_capture_header(audio_capture_file, audio_capture_bytes);
         failed |= ferror(audio_capture_file);
         failed |= fclose(audio_capture_file) != 0;
         audio_capture_file = NULL;
+    }
+    if (audio_capture_state)
+    {
+        failed |= ferror(audio_capture_state);
+        failed |= fclose(audio_capture_state) != 0;
+        audio_capture_state = NULL;
+    }
+    else if (had_capture)
+    {
+        failed = 1;
+    }
+    if (had_capture)
+    {
+        audio_capture_publish(failed ? AUDIO_CAPTURE_FAILED : AUDIO_CAPTURE_COMPLETE, 0);
         fprintf(stderr, "[AUDIO-CAPTURE] %s (%u PCM bytes).\n",
                 failed ? "Write failed" : "Complete", audio_capture_bytes);
     }
-    if (audio_capture_state) { fclose(audio_capture_state); audio_capture_state = NULL; }
     audio_post_frames = 0;
 }
 
@@ -144,7 +192,14 @@ static void audio_capture_frame(MCPXAPUState *d)
         if (audio_diagnostic_enabled)
             audio_history = calloc(AUDIO_HISTORY_FRAMES, sizeof(*audio_history));
     }
-    if (!audio_history) return;
+    if (!audio_history)
+    {
+        if (InterlockedExchange(&audio_capture_request, 0))
+        {
+            audio_capture_publish(AUDIO_CAPTURE_FAILED, 0);
+        }
+        return;
+    }
     if (InterlockedExchange(&audio_capture_request, 0) && !audio_capture_file) {
         SYSTEMTIME t; char path[160]; GetLocalTime(&t);
         snprintf(path, sizeof path, "audio-capture-%04u%02u%02u-%02u%02u%02u-%03u-%lu.wav",
@@ -160,10 +215,16 @@ static void audio_capture_frame(MCPXAPUState *d)
             snprintf(path + strlen(path) - 4, 5, ".txt");
             audio_capture_state = fopen(path, "w");
             audio_post_frames = AUDIO_HISTORY_FRAMES;
+            audio_capture_publish(AUDIO_CAPTURE_RECORDING, 10000);
             fprintf(stderr, "[AUDIO-CAPTURE] Started %s; preceding frames=%u, following frames=%u.\n",
                     path, audio_history_count, audio_post_frames);
             audio_capture_snapshot(d, "trigger");
-        } else fprintf(stderr, "[AUDIO-CAPTURE] Cannot create recording.\n");
+        }
+        else
+        {
+            audio_capture_publish(AUDIO_CAPTURE_FAILED, 0);
+            fprintf(stderr, "[AUDIO-CAPTURE] Cannot create recording.\n");
+        }
     }
     if (audio_capture_file) {
         unsigned frames = sizeof(d->monitor.frame_buf) / sizeof(d->monitor.frame_buf[0]);
@@ -172,6 +233,7 @@ static void audio_capture_frame(MCPXAPUState *d)
         if ((audio_post_frames / 48000) != ((audio_post_frames - frames) / 48000))
             audio_capture_snapshot(d, "recording");
         audio_post_frames -= frames;
+        audio_capture_publish(AUDIO_CAPTURE_RECORDING, (audio_post_frames * 1000u + 47999u) / 48000u);
         if (!audio_post_frames || ferror(audio_capture_file)) audio_capture_close();
     }
     for (unsigned i = 0; i < sizeof(d->monitor.frame_buf) / sizeof(d->monitor.frame_buf[0]); ++i) {

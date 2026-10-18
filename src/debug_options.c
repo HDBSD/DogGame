@@ -6,6 +6,7 @@
 #include <io.h>
 #include <share.h>
 #include "debug_options.h"
+#include "xbox/renderer_options.h"
 /* Publish options only after every argument has passed validation. */
 TitleOptions title_options;
 static const char *usage = "DogGame.exe [--nofmv] [--noaudio] [--debug [options]]\n\n"
@@ -18,6 +19,7 @@ static const char *usage = "DogGame.exe [--nofmv] [--noaudio] [--debug [options]
                            "--trace                Trace the first rendered frame; requires --debug\n"
                            "--profiler             Capture a 10-second renderer profile; requires --debug\n"
                            "--fpsgraph             Show frame timing graph; requires --debug\n"
+                           "--vulkan               Experimental Vulkan renderer; requires --debug\n"
                            "--help                 Show this help\n\n"
                            "Pause, then select Debug with F1 or controller Back.\n";
 
@@ -63,6 +65,11 @@ int title_options_parse(int argc, const wchar_t *const *argv, char *error, unsig
         else if (!wcscmp(argument, L"--fpsgraph"))
         {
             options.fps_graph = 1;
+            requires_debug = 1;
+        }
+        else if (!wcscmp(argument, L"--vulkan"))
+        {
+            options.vulkan = 1;
             requires_debug = 1;
         }
         else if (!wcscmp(argument, L"--level"))
@@ -173,13 +180,22 @@ int title_options_init(void)
         _putenv_s("RECOMP_PROFILE_GPU", "1");
         DeleteFileA("debug-frame.trigger");
     }
+    /* Explicit experimental policy lives here; the backend owns device setup.
+     * Refuse startup if requested Vulkan is unavailable rather than quietly
+     * reporting a successful Vulkan run while drawing through D3D11. */
+    if (title_options.vulkan && !xbox_SelectExperimentalVulkan(error, sizeof error))
+    {
+        fprintf(stderr, "[VULKAN] %s\n", error);
+        MessageBoxA(NULL, error, "DogGame: Vulkan unavailable", MB_OK | MB_ICONERROR);
+        return -1;
+    }
     if (title_options.noaudio)
     {
         extern volatile int g_audio_muted;
         g_audio_muted = 1;
     }
-    fprintf(stderr, "[OPTIONS] debug=%d nofmv=%d noaudio=%d level=%s save=%d\n", title_options.debug,
-            title_options.nofmv, title_options.noaudio, title_options.level, title_options.save_slot);
+    fprintf(stderr, "[OPTIONS] debug=%d nofmv=%d noaudio=%d level=%s save=%d vulkan=%d\n", title_options.debug,
+            title_options.nofmv, title_options.noaudio, title_options.level, title_options.save_slot, title_options.vulkan);
     title_debug_init();
     return 0;
 }

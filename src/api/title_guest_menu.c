@@ -45,6 +45,17 @@ uint32_t title_menu_current_mode(void)
     return MEM32(MENU_MODE_ADDRESS);
 }
 
+int title_menu_request_pause(void)
+{
+    uint32_t controller = MEM32(CONTROLLER_TABLE_ADDRESS);
+    if (!guest_object_readable(controller, CONTROLLER_BYTES_REQUIRED))
+    {
+        return 0;
+    }
+    MEM32(controller + CONTROLLER_PRESSED_OFFSET) |= BUTTON_START;
+    return 1;
+}
+
 int title_menu_map_page_visible(uint32_t scene, uint32_t menu_mode)
 {
     if (menu_mode != TITLE_MENU_MAP || !guest_object_readable(scene, SCENE_BYTES_REQUIRED))

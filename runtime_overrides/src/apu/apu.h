@@ -6,6 +6,7 @@
 #pragma once
 
 #include <stdint.h>
+#include "../../include/xbox/audio_capture.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -70,9 +71,6 @@ void apu_mixer_get_state(int slot, uint32_t *byte_offset, int *active, int *loop
 /* Start/resume or stop playback without changing the current position. */
 void apu_mixer_play(int slot, int looping);
 void apu_mixer_stop(int slot);
-
-/* Request a bounded pre/post output capture; consumed by the APU thread. */
-void apu_debug_audio_request(void);
 
 #ifdef __cplusplus
 }

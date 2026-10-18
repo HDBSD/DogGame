@@ -19,6 +19,13 @@ int xbox_DisplayFpsCap(void);
 void xbox_DisplayFpsCapSet(int enabled);
 int xbox_DisplayDynamicPrompts(void);
 void xbox_DisplayDynamicPromptsSet(int enabled);
+/* Atomic host policy. Persisted alongside the other Recomp Settings.
+ * The title thread consumes focus-loss requests and decides whether to pause;
+ * window callbacks never read or mutate guest state. Disabling clears pending
+ * requests. Regaining focus does not resume the game. */
+int xbox_DisplayPauseOnFocusLoss(void);
+void xbox_DisplayPauseOnFocusLossSet(int enabled);
+int xbox_DisplayConsumeFocusLoss(void);
 /* Request client-area cursor confinement and hiding during gameplay.
  * The display thread applies it only while the game window is active. */
 void xbox_DisplayGameplayCursor(int playing);

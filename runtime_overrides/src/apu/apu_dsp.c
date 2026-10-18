@@ -24,6 +24,17 @@
 
 #include "apu_state.h"
 #include "fpconv.h"
+#include "apu_signal_meter.h"
+
+static ApuSignalMeter s_mixdown_meter;
+static int mcpx_apu_mixdown_all(void);
+
+void mcpx_apu_dsp_write_signal_diagnostics(FILE *file)
+{
+    fprintf(file, "dsp-signal mixdown_all=%d", mcpx_apu_mixdown_all());
+    apu_signal_meter_write(file, "preclamp", &s_mixdown_meter);
+    fputc('\n', file);
+}
 
 #include <stdlib.h>
 #include <string.h>
@@ -188,6 +199,7 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
      */
 
     int off = (d->ep_frame_div % 8) * NUM_SAMPLES_PER_FRAME;
+    int meter_enabled = apu_signal_meter_enabled();
 
     if (d->monitor.point != MCPX_APU_DEBUG_MON_VP) {
         for (int i = 0; i < NUM_SAMPLES_PER_FRAME; i++) {
@@ -229,6 +241,11 @@ void mcpx_apu_dsp_frame(MCPXAPUState *d,
             } else {
                 left = mixbins[0][i];
                 right = mixbins[1][i];
+            }
+            if (meter_enabled)
+            {
+                apu_signal_meter_sample(&s_mixdown_meter, left);
+                apu_signal_meter_sample(&s_mixdown_meter, right);
             }
             /* Clamp to [-1, 1] range */
             if (left > 1.0f) left = 1.0f;

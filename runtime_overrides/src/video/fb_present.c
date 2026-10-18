@@ -109,6 +109,39 @@ void xbox_DisplayBorderlessSet(int enabled)
 static volatile LONG s_widescreen;
 static volatile LONG s_mouse_interaction=1;
 static volatile LONG s_dynamic_prompts=1;
+static volatile LONG s_pause_on_focus_loss = 1;
+static volatile LONG s_focus_loss_pending;
+
+int xbox_DisplayPauseOnFocusLoss(void)
+{
+    return InterlockedCompareExchange(&s_pause_on_focus_loss, 0, 0) != 0;
+}
+
+void xbox_DisplayPauseOnFocusLossSet(int enabled)
+{
+    InterlockedExchange(&s_pause_on_focus_loss, enabled != 0);
+    if (!enabled)
+    {
+        InterlockedExchange(&s_focus_loss_pending, 0);
+    }
+    if (s_display_ini[0])
+    {
+        WritePrivateProfileStringW(L"Display", L"PauseOnFocusLoss", enabled ? L"1" : L"0", s_display_ini);
+    }
+}
+
+int xbox_DisplayConsumeFocusLoss(void)
+{
+    return InterlockedExchange(&s_focus_loss_pending, 0) != 0 && xbox_DisplayPauseOnFocusLoss();
+}
+
+static void queue_focus_loss(void)
+{
+    if (xbox_DisplayPauseOnFocusLoss())
+    {
+        InterlockedExchange(&s_focus_loss_pending, 1);
+    }
+}
 static volatile LONG s_fps_cap;
 int xbox_DisplayFpsCap(void) { return s_fps_cap!=0; }
 void xbox_DisplayFpsCapSet(int enabled)
@@ -195,6 +228,7 @@ static void display_load(void)
     InterlockedExchange(&s_mouse_interaction,GetPrivateProfileIntW(L"Display",L"MouseInteraction",1,s_display_ini)!=0);
     InterlockedExchange(&s_fps_cap,GetPrivateProfileIntW(L"Display",L"FpsCap30",0,s_display_ini)!=0);
     InterlockedExchange(&s_dynamic_prompts,GetPrivateProfileIntW(L"Display",L"DynamicButtonPrompts",1,s_display_ini)!=0);
+    InterlockedExchange(&s_pause_on_focus_loss, GetPrivateProfileIntW(L"Display", L"PauseOnFocusLoss", 1, s_display_ini) != 0);
     InterlockedExchange(&s_borderless,GetPrivateProfileIntW(L"Display",L"Borderless",0,s_display_ini)!=0);
     InterlockedExchange(&s_internal_scaling,GetPrivateProfileIntW(L"Display",L"InternalScaling",0,s_display_ini)!=0);
     unsigned internal=GetPrivateProfileIntW(L"Display",L"InternalResolution",0,s_display_ini);
@@ -761,6 +795,7 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
     /* Alt-tabbing away with a key held would leave it held for ever. */
     case WM_KILLFOCUS:
         cursor_release();
+        queue_focus_loss();
         memset((void *)s_key_down, 0, sizeof s_key_down);
         return 0;
     }
@@ -1172,6 +1207,9 @@ void xbox_DisplayMouseInteractionSet(int enabled) { (void)enabled; }
 int xbox_DisplayFpsCap(void) { return 0; }
 void xbox_DisplayFpsCapSet(int enabled) { (void)enabled; }
 int xbox_DisplayDynamicPrompts(void) { return 1; }
+int xbox_DisplayPauseOnFocusLoss(void) { return 1; }
+void xbox_DisplayPauseOnFocusLossSet(int enabled) { (void)enabled; }
+int xbox_DisplayConsumeFocusLoss(void) { return 0; }
 void xbox_DisplayRequestQuit(void) {}
 int xbox_DisplayBorderless(void) { return 0; }
 void xbox_DisplayBorderlessSet(int enabled) { (void)enabled; }

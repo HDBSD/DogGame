@@ -42,7 +42,7 @@ target_include_directories(xbox_kernel PUBLIC
 )
 
 if(WIN32)
-    target_sources(xbox_kernel PRIVATE nv2a_gpu.cpp)
+    target_sources(xbox_kernel PRIVATE nv2a_gpu.cpp nv2a_gpu_dispatch.cpp nv2a_vulkan.cpp)
     # platform is an INTERFACE target on Windows: it contributes the src/
     # include path that "platform/xbox_winnt.h" resolves against.
     target_link_libraries(xbox_kernel PUBLIC platform kernel32 bcrypt d3d11 d3dcompiler)
@@ -56,6 +56,7 @@ if(MSVC)
     # Keep source locations for the hot renderer paths in optimized builds.
     # Embedded symbols survive static-library linking into the game's PDB.
     set_source_files_properties(nv2a_pb_exec.c nv2a_pb_scan.c nv2a_vsh_interp.c nv2a_gpu.cpp
+        nv2a_gpu_dispatch.cpp nv2a_vulkan.cpp
         PROPERTIES COMPILE_OPTIONS "$<$<CONFIG:Release>:/Z7>")
     target_compile_options(xbox_kernel PRIVATE /W4 /WX- /O2 /GS- /Gy)
     target_compile_definitions(xbox_kernel PRIVATE _CRT_SECURE_NO_WARNINGS)

@@ -22,6 +22,10 @@ uint32_t title_menu_current_mode(void);
 int title_menu_map_page_visible(uint32_t scene, uint32_t menu_mode);
 int menu_accepts_back(uint32_t menu_mode);
 void remap_controller_press_edges(TitleMenuButton source, TitleMenuButton destination);
+/* Title thread, immediately after controller polling. Queues the native Start
+ * press in player one's decoded input; returns zero for an unreadable pad.
+ * Does not change held input or force a menu mode. Caller gates gameplay. */
+int title_menu_request_pause(void);
 
 /* Observation only, title thread. Copies the current decoded player-one state;
  * not an atomic snapshot of the asynchronous USB/XAPI transport. No mutations.
