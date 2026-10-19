@@ -61,8 +61,17 @@ add_subdirectory("${XBOXRECOMP_DIR}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 # is silently left out of the build and shows up as unresolved externals.
 file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 
+# Preserve generated files verbatim. External calls pass through maintained
+# observers; their delegates still execute the original translated bodies.
+set_property(SOURCE src/recomp/gen/recomp_0024.c APPEND PROPERTY
+    COMPILE_DEFINITIONS sub_00152FEC=title_translated_00152FEC)
+set_property(SOURCE src/recomp/gen/recomp_0018.c APPEND PROPERTY
+    COMPILE_DEFINITIONS sub_001000B0=title_translated_001000B0)
+
 # Core game sources
 set(GAME_SOURCES
+    src/api/title_guest_movie_frame.c
+    src/overrides/movie_frame.c
     src/main.c
     src/recomp_manual.c
     src/title_overrides.c

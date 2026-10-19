@@ -187,3 +187,23 @@ Driver fixtures cover CPU edits, slot reuse before submission, shared surfaces,
 clears, eviction and 4K subpixel retention. Measurements and remaining limits
 are recorded in `VULKAN_FRAME_TIME_ROOT_CAUSE.md`. No title rendering routine
 or generated code was replaced.
+
+FMV refresh timing correction (19 October 2026): `kernel_vblank_tick` used
+coarse uptime milliseconds to schedule nominal 60-Hz guest refresh interrupts.
+Local resolution probes and movie clock reports reproduced 15/31-ms spacing;
+QPC scheduling removes that quantization while retaining the existing guest
+ISR path, field toggle and callback order. This is host timing evidence, not
+a new recovery of the XMV decoder. Tests exercise fractional periods, stalls
+and fallback; movie runs cover repeated reads with audio enabled. The registered
+device counter policy and generated sources are unchanged. Visual/AV validation
+limits and artifacts are recorded in `FMV_INVESTIGATION.md`.
+
+FMV delivery correction (19 October 2026): a later probe identified competing
+native and synthetic writes to device+1DD8. The linked path at 000FD227/000FD23A
+and consumer 000FF010 are retained; synthetic registration is diagnostic-only.
+This removed repeated video stalls of up to 359 ms in a cin1 startup probe.
+Separately, 0015414F locks the output copied by 0015413D; status 1 at 001534FE
+follows that copy. Maintained observers now publish owned host pixels there,
+preserving the translated delegates, guest stack consumption and register
+outputs. Generated source was not edited. Layout, ABI tests, cadence results
+and remaining visual validation limits are recorded in `FMV_INVESTIGATION.md`.

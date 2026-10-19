@@ -27,6 +27,7 @@
 
 #include "kernel.h"
 #include "guest_clock.h"
+#include "video_refresh_clock.h"
 #include "guest_vmem.h"
 #include "xbox_memory_layout.h"
 #include "recomp_icall_feedback.h"
@@ -2299,23 +2300,81 @@ uint32_t xbox_ReadIoPort(uint32_t port, uint32_t bytes)
 static void kernel_vblank_tick(void)
 {
     static int enabled = -1;
-    static long long next_ms;
+    static int trace_enabled;
+    static XboxVideoRefreshClock clock;
+    static LARGE_INTEGER frequency;
+    LARGE_INTEGER counter;
     long long now;
 
     if (enabled < 0)
+    {
         enabled = getenv("RECOMP_VBLANK") != NULL;
+        trace_enabled = getenv("RECOMP_OVERLAY_STATS") != NULL;
+    }
     if (!enabled)
+    {
         return;
+    }
 
-    now = (long long)GetTickCount64();
-    if (now < next_ms)
-        return;
-    /* Next 60-Hz boundary, retaining the fractional millisecond. A fixed
-     * 16-ms deadline drifts; a 10-ms polling sleep reduces it to ~40-50 Hz. */
-    next_ms = (((now * 60 / 1000) + 1) * 1000 + 59) / 60;
-
+    if (!frequency.QuadPart)
+    {
+        QueryPerformanceFrequency(&frequency);
+    }
+    if (frequency.QuadPart > 0 && QueryPerformanceCounter(&counter))
+    {
+        if (!xbox_video_refresh_due(&clock, (uint64_t)counter.QuadPart, (uint64_t)frequency.QuadPart))
+        {
+            return;
+        }
+        now = counter.QuadPart / frequency.QuadPart * 1000 +
+            counter.QuadPart % frequency.QuadPart * 1000 / frequency.QuadPart;
+    }
+    else
+    {
+        now = (long long)GetTickCount64();
+        if (!xbox_video_refresh_due(&clock, (uint64_t)now, 1000))
+        {
+            return;
+        }
+    }
+    /* GetTickCount64 stays coarse even with timeBeginPeriod(1). Using it to
+     * schedule 60-Hz fields created 15/31-ms spacing. QPC deadlines retain the
+     * original rate and callback order without changing decoder timestamps. */
     if (!xbox_GetConnectedInterrupt(NV2A_VECTOR))
+    {
         return;
+    }
+
+    /* Observation only: actual interrupt dispatch cadence, not a decoded-frame
+     * count. Keep this opt-in and aggregate writes off the per-field path. */
+    if (trace_enabled)
+    {
+        static long long start_ms, previous_ms, maximum_gap;
+        static unsigned fields, late_fields;
+        long long gap = previous_ms ? now - previous_ms : 0;
+        if (!start_ms)
+        {
+            start_ms = now;
+        }
+        if (gap > maximum_gap)
+        {
+            maximum_gap = gap;
+        }
+        if (gap > 25)
+        {
+            late_fields++;
+        }
+        previous_ms = now;
+        fields++;
+        if (now - start_ms >= 5000)
+        {
+            fprintf(stderr, "[VIDEO-CLOCK] dispatch=%.2f/s max-gap=%lld ms gaps-over25=%u\n",
+                    fields * 1000.0 / (now - start_ms), maximum_gap, late_fields);
+            start_ms = now;
+            fields = late_fields = 0;
+            maximum_gap = 0;
+        }
+    }
 
     g_video_field ^= 1u;
 

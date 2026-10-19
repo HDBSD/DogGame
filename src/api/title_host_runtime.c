@@ -60,9 +60,12 @@ void title_host_initialize_devices(void)
      * The first PUT is an end pointer; starting there loses GPU setup. */
     xbox_Nv2aRingBase(0x0010E648u, 0x24u);
     xbox_Nv2aCompletionEvent(0x0010E648u, 0x1DBCu);
-    /* XMV paces decoding through D3D's field/frame counter. A completed DMA
-     * fence alone does not advance this clock, leaving the first video pending. */
-    if (!getenv("RECOMP_TITLE_FRAMECOUNTER"))
+    /* SD100F's linked refresh path advances device+1DD8 at 000FD227-000FD23A.
+     * The runtime's synthetic timer/flip writer advanced the same word again.
+     * FMVs then waited and caught up in bursts (up to 359 ms in cin1). With
+     * the native writer alone, the probe presented 30 images/s without skips.
+     * Retain the old fallback solely as an explicit diagnostic opt-in. */
+    if (getenv("RECOMP_SYNTHETIC_FRAMECOUNTER") && !getenv("RECOMP_TITLE_FRAMECOUNTER"))
     {
         xbox_Nv2aFrameCounter(0x0010E648u, 0x1DD8u);
     }

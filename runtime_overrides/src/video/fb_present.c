@@ -19,6 +19,7 @@
 #include "../../include/xbox/display_options.h"
 #include "../../include/xbox/application_identity.h"
 #include "../../include/xbox/renderer_options.h"
+#include "../../include/xbox/movie_frame.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -27,6 +28,150 @@
 #include <string.h>
 
 extern ptrdiff_t xbox_GetMemoryOffset(void);
+
+typedef struct MovieImage
+{
+    uint8_t *pixels;
+    size_t capacity;
+    uint32_t physical, pitch, width, height;
+    uint64_t sequence;
+} MovieImage;
+
+static SRWLOCK s_movie_lock = SRWLOCK_INIT;
+static MovieImage s_movie_images[4];
+static MovieImage s_window_movie;
+static uint64_t s_movie_sequence;
+static DWORD s_movie_stats_start, s_movie_previous_tick, s_movie_max_gap;
+
+void xbox_MovieFramePublish(const void *pixels, uint32_t physical,
+                            uint32_t pitch, uint32_t width, uint32_t height)
+{
+    MovieImage *image = &s_movie_images[0];
+    size_t bytes = (size_t)pitch * height;
+    if (!pixels || !width || !height || width > 2048 || height > 2048 ||
+        pitch < width * 2 || pitch > 8192)
+    {
+        return;
+    }
+    AcquireSRWLockExclusive(&s_movie_lock);
+    for (unsigned i = 0; i < 4; i++)
+    {
+        MovieImage *candidate = &s_movie_images[i];
+        if (candidate->sequence && candidate->physical == physical)
+        {
+            image = candidate;
+            break;
+        }
+        if (candidate->sequence < image->sequence)
+        {
+            image = candidate;
+        }
+    }
+    if (image->capacity < bytes)
+    {
+        void *allocation = realloc(image->pixels, bytes);
+        if (!allocation)
+        {
+            ReleaseSRWLockExclusive(&s_movie_lock);
+            return;
+        }
+        image->pixels = allocation;
+        image->capacity = bytes;
+    }
+    memcpy(image->pixels, pixels, bytes);
+    image->physical = physical;
+    image->pitch = pitch;
+    image->width = width;
+    image->height = height;
+    image->sequence = ++s_movie_sequence;
+    DWORD now = GetTickCount();
+    if (!s_movie_stats_start)
+    {
+        s_movie_stats_start = now;
+    }
+    if (s_movie_previous_tick && now - s_movie_previous_tick > s_movie_max_gap)
+    {
+        s_movie_max_gap = now - s_movie_previous_tick;
+    }
+    s_movie_previous_tick = now;
+    if (getenv("RECOMP_OVERLAY_STATS") && (s_movie_sequence == 1 || s_movie_sequence % 150 == 0))
+    {
+        fprintf(stderr, "[MOVIE-FRAME] completed=%llu physical=%08X pitch=%u size=%ux%u rate=%.2f max-gap=%u ms\n",
+                (unsigned long long)s_movie_sequence, physical, pitch, width, height,
+                (s_movie_sequence - 1) * 1000.0 / (now - s_movie_stats_start + 1), (unsigned)s_movie_max_gap);
+    }
+    ReleaseSRWLockExclusive(&s_movie_lock);
+}
+
+/* Window-owned copy permits conversion without holding the decoder's lock.
+ * Contention keeps the previous complete image rather than scanning guest RAM. */
+static const uint8_t *movie_image_acquire(uint32_t physical, uint32_t pitch,
+                                        uint32_t width, uint32_t height)
+{
+    static uint64_t previous_sequence;
+    static unsigned presented, skipped;
+    static DWORD stats_start;
+    if (TryAcquireSRWLockShared(&s_movie_lock))
+    {
+        for (unsigned i = 0; i < 4; i++)
+        {
+            MovieImage *image = &s_movie_images[i];
+            if (!image->sequence || image->physical != physical || image->pitch != pitch ||
+                image->width < width || image->height < height)
+            {
+                continue;
+            }
+            size_t bytes = (size_t)pitch * height;
+            if (s_window_movie.capacity < bytes)
+            {
+                void *allocation = realloc(s_window_movie.pixels, bytes);
+                if (!allocation)
+                {
+                    break;
+                }
+                s_window_movie.pixels = allocation;
+                s_window_movie.capacity = bytes;
+            }
+            memcpy(s_window_movie.pixels, image->pixels, bytes);
+            s_window_movie.physical = physical;
+            s_window_movie.pitch = pitch;
+            s_window_movie.height = height;
+            s_window_movie.sequence = image->sequence;
+            if (image->sequence != previous_sequence)
+            {
+                if (previous_sequence && image->sequence > previous_sequence + 1)
+                {
+                    skipped += (unsigned)(image->sequence - previous_sequence - 1);
+                }
+                previous_sequence = image->sequence;
+                presented++;
+            }
+            break;
+        }
+        ReleaseSRWLockShared(&s_movie_lock);
+    }
+    if (getenv("RECOMP_OVERLAY_STATS"))
+    {
+        DWORD now = GetTickCount();
+        if (!stats_start)
+        {
+            stats_start = now;
+        }
+        if (now - stats_start >= 5000)
+        {
+            fprintf(stderr, "[MOVIE-PRESENT] complete-images=%.2f/s skipped=%u\n",
+                    presented * 1000.0 / (now - stats_start), skipped);
+            stats_start = now;
+            presented = skipped = 0;
+        }
+    }
+    if (!s_window_movie.sequence || s_window_movie.physical != physical ||
+        s_window_movie.pitch != pitch || s_window_movie.height != height)
+    {
+        return NULL;
+    }
+    return s_window_movie.pixels;
+}
 
 /* 0: not started, 1: running, -1: closed permanently. A flip must never
  * restart the display while the closing thread is releasing its resources. */
@@ -995,8 +1140,10 @@ static void fb_overlay(void)
     ox = xy & 0xFFFu; oy = (xy >> 16) & 0xFFFu;
     if (!pitch || !iw || !ih || !ow || !oh || pitch < iw * 2u
             || (uint64_t)physical + (uint64_t)pitch * ih > 0x04000000u) return;
-    /* This opt-in scanout uses the contiguous DMA window. */
-    src = (const uint8_t *)((uintptr_t)(physical | 0x80000000u) + offset);
+    /* The decoder observer owns pixel publication. Registers still describe
+     * positioning and bank selection, but never grant ownership of live pixels. */
+    src = movie_image_acquire(physical, pitch, iw, ih);
+    if (!src) return;
     /* Movies can rewrite one fixed scanout surface. Sample its contents to
      * measure visible changes; repeated/static frames intentionally do not
      * count. This is an observed update rate, not the encoded frame rate. */
@@ -1274,6 +1421,15 @@ void xbox_FramebufferWindowStart(void)
 }
 
 #else
+void xbox_MovieFramePublish(const void *pixels, uint32_t physical,
+                            uint32_t pitch, uint32_t width, uint32_t height)
+{
+    (void)pixels;
+    (void)physical;
+    (void)pitch;
+    (void)width;
+    (void)height;
+}
 void xbox_DisplayGameplayCursor(int playing) { (void)playing; }
 void xbox_MenuOverlayRegister(XboxOverlayDraw d, XboxOverlayKey k, XboxMenuClick c) { (void)d;(void)k;(void)c; }
 void xbox_MenuOverlayHoverRegister(XboxMenuHover h) { (void)h; }
