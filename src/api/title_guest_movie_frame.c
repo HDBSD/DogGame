@@ -8,8 +8,11 @@
 #include <stdlib.h>
 #endif
 
-void title_translated_00152FEC(void);
-void title_translated_001000B0(void);
+/* The recompiler's manual scanner recognizes extern sub_ADDRESS_gen as a
+ * wrapped body to retain. A custom delegate name would make clean setup
+ * generation omit the original routine while retaining only our observer. */
+extern void sub_00152FEC_gen(void);
+extern void sub_001000B0_gen(void);
 
 /* SD100F: 0015413D locks the destination at 0015414F, then converts
  * decoder +40/+44 pixels into it. 001534FE reports status 1 only after
@@ -22,7 +25,7 @@ void title_guest_movie_lock_surface(void)
 {
     uint32_t output = MEM32(esp + 8);
     int movie_lock = observing_movie && MEM32(esp) == 0x0015415Fu;
-    title_translated_001000B0();
+    sub_001000B0_gen();
     if (movie_lock && output >= 0x10000u && output <= 0x03FFFFF8u)
     {
         locked_pitch = MEM32(output);
@@ -45,7 +48,7 @@ void title_guest_movie_step(void)
     locked_pixels = 0;
     locked_pitch = 0;
     observing_movie = 1;
-    title_translated_00152FEC();
+    sub_00152FEC_gen();
     observing_movie = 0;
 #if defined(_WIN32)
     uint64_t elapsed = GetTickCount64() - started;

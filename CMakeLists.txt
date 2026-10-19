@@ -69,12 +69,27 @@ add_subdirectory("${XBOXRECOMP_DIR}" "${CMAKE_BINARY_DIR}/xboxrecomp")
 # is silently left out of the build and shows up as unresolved externals.
 file(GLOB RECOMP_GEN_SOURCES CONFIGURE_DEPENDS "src/recomp/gen/*.c")
 
-# Preserve generated files verbatim. External calls pass through maintained
-# observers; their delegates still execute the original translated bodies.
-set_property(SOURCE src/recomp/gen/recomp_0024.c APPEND PROPERTY
-    COMPILE_DEFINITIONS sub_00152FEC=title_translated_00152FEC)
-set_property(SOURCE src/recomp/gen/recomp_0018.c APPEND PROPERTY
-    COMPILE_DEFINITIONS sub_001000B0=title_translated_001000B0)
+# Fresh generation emits the recompiler's supported sub_ADDRESS_gen wrappers.
+# Older generated trees still contain the original definitions: rename those
+# at compile time, without editing generated files. Locate by entry point;
+# excluding maintained routines changes chunk boundaries in a clean setup.
+foreach(address IN ITEMS 00152FEC 001000B0)
+    set(delegate_count 0)
+    foreach(source IN LISTS RECOMP_GEN_SOURCES)
+        file(STRINGS "${source}" definition LIMIT_COUNT 1
+            REGEX "^void sub_${address}(_gen)?\\(void\\)[ \t]*$")
+        if(definition)
+            math(EXPR delegate_count "${delegate_count} + 1")
+            if(definition MATCHES "^void sub_${address}\\(")
+                set_property(SOURCE "${source}" APPEND PROPERTY
+                    COMPILE_DEFINITIONS sub_${address}=sub_${address}_gen)
+            endif()
+        endif()
+    endforeach()
+    if(NOT delegate_count EQUAL 1)
+        message(FATAL_ERROR "Expected one generated delegate for sub_${address}; regenerate with scripts/generate_game.py")
+    endif()
+endforeach()
 
 # Core game sources
 set(GAME_SOURCES

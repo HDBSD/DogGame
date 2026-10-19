@@ -27,7 +27,7 @@ uint32_t esp, eax, ecx, edx;
 ''' + snapshot + f'\n#include "{(root / "src/api/title_guest_movie_frame.c").as_posix()}"\n' + r'''
 static unsigned step_calls, lock_calls;
 static uint32_t result_status = 1, return_address = 0x0015415F;
-void title_translated_001000B0(void)
+void sub_001000B0_gen(void)
 {
     lock_calls++;
     MEM32(MEM32(esp + 8)) = 8;
@@ -35,7 +35,7 @@ void title_translated_001000B0(void)
     esp += 20;
     eax = 111; ecx = 222; edx = 333;
 }
-void title_translated_00152FEC(void)
+void sub_00152FEC_gen(void)
 {
     step_calls++;
     uint32_t entry = esp;

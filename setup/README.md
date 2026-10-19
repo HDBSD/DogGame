@@ -4,6 +4,13 @@ DogGameSetup.exe is a self-contained Windows x64 application. It embeds Python w
 
 ## Build and update
 
+Clean game generation must retain the original routines called by maintained
+FMV observers. They use the recompiler's `extern sub_ADDRESS_gen(void)` wrapper
+convention; arbitrary delegate names make the manual scanner omit their bodies.
+`tests/Check-GeneratedDelegates.py` verifies this against the pinned scanner.
+CMake also supports older generated trees by locating the original definitions
+by address instead of assuming fixed chunk filenames.
+
 - **Build** selects the extracted Xbox game folder containing the supported `default.xbe`. The built game is installed into `DogGame-Contents` beside `DogGameSetup.exe`. There is no installation-folder picker.
 - **Update** downloads fresh source using the saved Xbox game folder and updates the adjacent `DogGame-Contents` installation.
 - **Play** launches `DogGame-Contents/DogGame.exe` with that folder as its working directory, so game assets resolve correctly. It is enabled when the executable exists, independently of build-tool availability.

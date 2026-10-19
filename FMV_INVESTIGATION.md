@@ -138,11 +138,16 @@ last complete matching image, never writable guest pixels. PVIDEO positioning
 and bank registers remain observation-only reads, not an atomic register
 snapshot. Both backends use this video handoff; audio queues are unchanged.
 
-CMake renames two generated symbols at compile time so maintained observers
-can delegate to their original bodies. Generated source remains untouched.
-Future regeneration must retain the delegated bodies as well as the maintained
-entry points. The adapter supports this SD100F translation; it is not a new
-high-level recovery of the XMV decoder.
+The observer declares the recompiler's supported `extern sub_ADDRESS_gen`
+delegates. Its manual scanner therefore retains both original bodies during
+clean setup generation while callers still enter the maintained observers.
+For older generated trees, CMake locates original definitions by entry address
+and renames them at compile time. No chunk number is assumed and checked-out
+generated source remains untouched. The previous custom `title_translated_`
+names were invisible to the scanner, causing clean setup builds to omit these
+bodies and fail at link time. `Check-GeneratedDelegates.py` checks this boundary
+against the pinned runtime scanner. The adapter supports this SD100F
+translation; it is not a new high-level recovery of the XMV decoder.
 
 `tests/Check-MovieFrameHandoff.py` compiles the actual adapter and snapshot code
 with an ABI fixture. It checks single delegation, native stack consumption and
