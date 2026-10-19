@@ -3061,6 +3061,33 @@ static uint32_t heap_carve_free(uint32_t size, uint32_t alignment)
     return 0;
 }
 
+/* The bump frontier is not a live allocation. A free block ending there can
+ * join the unused arena above it. Without this, E009's 5,376,016-byte audio
+ * bank failed with a 5,208,080-byte free tail and another 1,005,552 bytes above
+ * the frontier. The caller subsequently used NULL-relative sound addresses.
+ * Caller holds g_heap_lock; only exactly adjacent, tracked free blocks move
+ * the frontier. Never move live allocations or infer ownership across gaps. */
+static void heap_trim_free_tail(void)
+{
+    while (g_heap_block_count > 0)
+    {
+        int last = g_heap_block_count - 1;
+        if (!g_heap_blocks[last].size)
+        {
+            g_heap_block_count--;
+            continue;
+        }
+        if (!g_heap_blocks[last].free ||
+            (uint64_t)g_heap_blocks[last].addr + g_heap_blocks[last].size != g_heap_next)
+        {
+            break;
+        }
+        g_heap_next = g_heap_blocks[last].addr;
+        memset(&g_heap_blocks[last], 0, sizeof g_heap_blocks[last]);
+        g_heap_block_count--;
+    }
+}
+
 /*
  * Simulated stacks for spawned threads.
  *
@@ -3419,6 +3446,7 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
         result = heap_carve_free(size, alignment);
         if (result)
             return result;
+        heap_trim_free_tail();
     } else {
         for (int i = 0; i < g_heap_block_count; i++) {
             if (!g_heap_blocks[i].free || g_heap_blocks[i].size < size) {
@@ -3472,6 +3500,15 @@ static uint32_t heap_alloc_locked(uint32_t size, uint32_t alignment)
         return 0;
     }
 
+    /* Keep alignment padding available for coalescing. Otherwise each freed
+     * page-aligned allocation leaves an untracked gap that separates the
+     * large reusable regions needed by later level sound banks. Leave room
+     * for the allocation's own descriptor when the table is nearly full. */
+    if (xbox_HeapReclaimEnabled() && result > g_heap_next &&
+        g_heap_block_count < XBOX_HEAP_MAX_BLOCKS - 1)
+    {
+        heap_insert_free(g_heap_block_count, g_heap_next, result - g_heap_next);
+    }
     g_heap_next = result + size;
 
     /* Zero-fill the allocated block (Xbox memory is always zeroed) */
@@ -3581,6 +3618,10 @@ void xbox_HeapFree(uint32_t xbox_va)
                 g_heap_blocks[i].size = 0;
                 g_heap_blocks[i].addr = 0;
             }
+        }
+        if (xbox_HeapReclaimEnabled())
+        {
+            heap_trim_free_tail();
         }
         ReleaseSRWLockExclusive(&g_heap_lock);
         return;

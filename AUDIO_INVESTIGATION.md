@@ -157,3 +157,108 @@ voice lists, VP monitor publication and empty lists. Portable and MSVC game
 builds pass. The correction removes a demonstrated block-dropout path, but
 an E006 listening comparison is still needed to establish its effect on the
 reported sound; the clipping and partial-tail candidates remain separate.
+
+## Live E009 corruption capture, 19 October 2026
+
+The user reported ongoing corruption while preview process 5980 was running,
+then identified the current level as E009. Evidence was preserved under
+`build/audio-corruption-20261019/` without stopping, suspending or modifying
+the process. Both 20-second WAV/report pairs from that session were copied:
+17:54:55 and 18:26:02. The user has not explicitly confirmed which recording
+contains the reported audible corruption, so neither is labelled a verified
+healthy or corrupted reference solely from its timestamp.
+
+A read-only live snapshot at 18:27:59 contains 1,544,712 bytes of native APU
+state and all 64 MiB of guest RAM, with no unreadable chunks. Addresses were
+resolved from the running preview's symbols and relocated image base:
+`g_apu_state` RVA 01505480, `g_xbox_mem_offset` RVA 009C7E68. The state's size
+was compiled from the matching portable runtime header. Metadata and the
+temporary capture/inspection tools are beside the snapshots. These are
+sequential copies while audio and gameplay continue, not an atomic snapshot;
+differences across boundaries do not by themselves prove corruption.
+
+The later report's output queue remains active with zero underruns and zero
+submission failures. Its cumulative full-queue count stays at seven throughout
+the recorded window, so no new full-queue drops are reported in that interval.
+It contains 2,224 PCM samples on the +/-32767 rails; the earlier WAV contains
+1,852. Neither rail occupancy nor the reported DSP over-range values establish
+the cause of persistent corruption. The reported voice meters contain no
+non-finite samples. No corrective code change or E009 fix is claimed from
+this evidence; source/sample lifetime and voice-state analysis remain open.
+
+### Debugger attachment and active source evidence
+
+At the user's request a local Windows Debug API helper attached to process
+5980, with kill-on-debugger-exit disabled. The first snapshot caught menu mode
+7. Its explicit detach returned access denied; after helper exit a separate
+`CheckRemoteDebuggerPresent` check confirmed no debugger remained and the game
+was responsive. A subsequent gameplay snapshot captured the native APU state,
+low guest RAM, the separate 64-MiB contiguous/physical mapping, image bounds,
+allocation high-water mark and thread contexts while all threads were stopped.
+That capture paused for 344 ms and detached successfully. The user confirmed
+corruption persisted after resuming and supplied additional 18:32/18:33 captures.
+All artifacts are under the same incident directory, with the second debugger
+snapshot under `debug-playing/`. Debugger pauses can introduce their own audio
+glitches and are not measurements of the pre-existing defect.
+
+The separate physical mapping matters: `mcpx_apu_phys` chooses low RAM for
+the loaded image range, contiguous storage below the allocation high-water
+mark otherwise, and low RAM beyond that. An initial offline audit of only low
+RAM reported zero active voices; that result is invalid because it read the
+voice table from the wrong backing store. The corrected gameplay audit uses
+the actual mapping policy and finds fourteen active voices with finite source
+pairs and plausible resampler state.
+
+Voice 6 in the debugger snapshot is mono S16 PCM, BA `00374000`, CBO 55227,
+EBO 67015. Its scatter/gather descriptor at physical `005BDC70` resolves the
+two buffered source samples to `0013FF72` and `0013FF74`. Those addresses lie
+inside the executable DSOUND image section (`001340C0` through `001524E4`).
+Their signed values are 5142 and 7959; dividing by 32768 gives exactly the
+retained resampler pair 0.15692138671875 and 0.242889404296875. This establishes
+that image-region bytes actually reached the source reader, rather than merely
+observing a transient pointer. Several other effect/loop voices resolve to
+entirely zero-filled source spans. The output queue alone cannot explain this
+source data. The descriptor's origin, expected asset address, reuse lifetime
+and physical-address resolution still need tracing before choosing a fix;
+the section can contain constants as well as instructions, and no claim is
+made that the two particular sampled words are decoded machine instructions.
+
+### Root cause and heap correction
+
+Further investigation established that this incident starts before DMA setup.
+The live log records E009 loading, followed by
+`xbox_HeapAlloc: out of memory (requested 5376016, used 49850384/50855936)`
+and an `NtReadFile` into buffer zero for 5,375,968 bytes, rejected with
+`STATUS_ACCESS_VIOLATION`. The following sound descriptors then cover low
+addresses starting at 0x9000 through approximately 0x520000. This links the
+NULL-relative sound-bank offsets to the previously observed image reads;
+changing physical-address routing would have hidden the allocation defect.
+
+The live host heap had 22,398,768 free bytes, but its largest free block was
+5,208,080 bytes at 0x03A13000, ending exactly at the bump frontier 0x03F0A810.
+Another 1,005,552 unused bytes lay above the frontier. The allocator searched
+freed blocks and unused bump space separately, so neither individual span
+satisfied the 5,376,016-byte request even though their union did. Earlier
+page-aligned allocations also discarded their alignment padding from the
+block table, leaving small untracked gaps between large freed regions.
+
+The maintained runtime allocator now returns tracked free tail blocks to the
+bump frontier and records new alignment gaps as free blocks. This remains
+under the existing `RECOMP_HEAP_RECLAIM` policy, enabled by this title. It
+retains the existing lock, never moves live allocations, never coalesces across
+unknown gaps, and preserves real exhaustion failures. Generated game code and
+audio sample decoding are unchanged. This is a host allocator correction,
+supported by the captured heap and load log, not a new recovery of game source.
+
+`tests/Check-HeapFrontier.py` reproduces the exact failed boundary with the
+legacy frontier behavior and passes with the production correction. It checks
+zeroing, live allocation ownership, repeated aligned allocation/free cycles,
+frontier recovery and genuine exhaustion. When the private incident capture
+is present it also replays the entire captured block table: the sound-bank
+allocation succeeds without overlapping or clearing any of the live blocks.
+Portable and MSVC game builds pass. The incident artifacts include
+`heap-blocks.bin`, `heap-metadata.json`, and the replay results under
+`build/heap-frontier-test/`. A long gameplay/load-transition comparison is
+still required to establish absence of other audio defects or exhaustion
+paths. The existing process cannot recover its failed sound-bank read merely
+by placing a corrected executable alongside it; restart with the new build.
