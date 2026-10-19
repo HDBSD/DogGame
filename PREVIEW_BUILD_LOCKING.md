@@ -2,6 +2,13 @@
 
 `PREVIEW_BUILD_LOCKING` is a CMake option, OFF by default. When enabled, `DogGame.exe` authenticates before initializing the game. Public builds exclude the authentication source, startup call, and authentication-specific libraries.
 
+For a locked preview that starts with Vulkan and the FPS graph enabled, configure
+with both `-DPREVIEW_BUILD_LOCKING=ON -DPREVIEW_VULKAN_FPSGRAPH=ON`. The latter
+option defaults OFF and requires preview locking. It also enables debug controls
+because the graph uses that interface; launch arguments are unnecessary. It does
+not change the internal resolution or frame cap defaults. Vulkan initialization
+failure remains a startup error rather than silently selecting DirectX.
+
 The C implementation ports the Auth0 flow in the workspace's `example.ps1`:
 
 - Tenant: `hdbsd.uk.auth0.com`

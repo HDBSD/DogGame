@@ -12,6 +12,9 @@ adapter = adapter.replace('#include "title_guest_menu.h"', '')
 display = (root / "src/title_display.c").read_text()
 start = display.index('static void remap_start_to_back_if_needed(')
 caller = display[start:display.index('\n}\n', start) + 3]
+video = (root / "runtime_overrides/src/video/fb_present.c").read_text()
+mouse_start = video.index('static POINT s_menu_mouse_position;')
+mouse = video[mouse_start:video.index('static LRESULT CALLBACK fb_wndproc', mouse_start)]
 
 prefix = r'''
 #include <stdint.h>
@@ -117,7 +120,23 @@ int main(void)
 }
 '''
 header = '#include "' + (root / 'src/api/title_guest_menu.h').as_posix() + '"\n'
-(out / "menu_input.c").write_text(prefix + header + adapter + caller + checks)
+checks = checks.replace('    uint32_t scene =', r'''
+    /* A stationary cursor must not retake selection after pausing, repainting
+     * or keyboard/controller navigation. Genuine movement re-enables hover. */
+    POINT position = {320, 240};
+    CHECK(!menu_mouse_position_changed(position));
+    CHECK(!menu_mouse_position_changed(position));
+    position.x++;
+    CHECK(menu_mouse_position_changed(position));
+    CHECK(!menu_mouse_position_changed(position));
+    position.y--;
+    CHECK(menu_mouse_position_changed(position));
+    s_menu_mouse_position_valid = 0;
+    CHECK(!menu_mouse_position_changed(position));
+    CHECK(!menu_mouse_position_changed(position));
+    uint32_t scene =''')
+(out / "menu_input.c").write_text(prefix + header + adapter + caller +
+    '\ntypedef struct { long x, y; } POINT;\n' + mouse + checks)
 vswhere = Path(os.environ['ProgramFiles(x86)']) / 'Microsoft Visual Studio/Installer/vswhere.exe'
 installation = subprocess.check_output([str(vswhere), '-latest', '-products', '*', '-requires',
                                         'Microsoft.VisualStudio.Component.VC.Tools.x86.x64',

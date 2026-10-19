@@ -8,6 +8,14 @@ set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 option(PREVIEW_BUILD_LOCKING "Require Auth0 Discord whitelist authorization at startup" OFF)
+option(PREVIEW_VULKAN_FPSGRAPH "Default to Vulkan and the debug FPS graph in a locked preview" OFF)
+if(PREVIEW_VULKAN_FPSGRAPH AND NOT PREVIEW_BUILD_LOCKING)
+    message(FATAL_ERROR "PREVIEW_VULKAN_FPSGRAPH requires PREVIEW_BUILD_LOCKING=ON")
+endif()
+if(PREVIEW_VULKAN_FPSGRAPH)
+    set_property(SOURCE src/debug_options.c APPEND PROPERTY
+        COMPILE_DEFINITIONS PREVIEW_VULKAN_FPSGRAPH=1)
+endif()
 
 # Common definitions
 add_compile_definitions(

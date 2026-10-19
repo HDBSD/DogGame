@@ -52,6 +52,34 @@ project = project.replace("apu_irq_harness.c", "renderer_options.c").replace("ob
 (out / "renderer_options.vcxproj").write_text(project)
 subprocess.run([msbuild, str(out / "renderer_options.vcxproj"), "/p:Configuration=Release", "/p:Platform=x64", "/verbosity:minimal"], check=True)
 subprocess.run([str(out / "bin/renderer_options.exe")], check=True)
+preview_fixture = '#include <stdio.h>\n#include <string.h>\n#include <wchar.h>\n'
+preview_fixture += '#define PREVIEW_VULKAN_FPSGRAPH 1\n'
+preview_fixture += f'#include "{(root / "src/debug_options.h").as_posix()}"\nTitleOptions title_options;\n'
+preview_fixture += parse + r'''
+int main(void)
+{
+    char error[512];
+    const wchar_t *ordinary[] = {L"DogGame.exe"};
+    const wchar_t *invalid[] = {L"DogGame.exe", L"--unknown"};
+    if (!title_options_parse(1, ordinary, error, sizeof error) ||
+        !title_options.debug || !title_options.vulkan || !title_options.fps_graph ||
+        title_options.nofmv || title_options.noaudio || title_options.level[0])
+    {
+        return 1;
+    }
+    if (title_options_parse(2, invalid, error, sizeof error) ||
+        !title_options.debug || !title_options.vulkan || !title_options.fps_graph)
+    {
+        return 2;
+    }
+    puts("Passed: locked preview defaults enable Vulkan, debug and graph without skipping movies or muting audio; invalid arguments remain rejected.");
+    return 0;
+}
+'''
+(out / "preview_options.c").write_text(preview_fixture)
+(out / "preview_options.vcxproj").write_text(project.replace("renderer_options", "preview_options"))
+subprocess.run([msbuild, str(out / "preview_options.vcxproj"), "/p:Configuration=Release", "/p:Platform=x64", "/verbosity:minimal"], check=True)
+subprocess.run([str(out / "bin/preview_options.exe")], check=True)
 backend = root / "runtime_overrides/src/kernel"
 shader = (backend / "nv2a_gpu.cpp").read_text().split('static const char shader[]=R"(', 1)[1].split(')";', 1)[0]
 shader = shader.replace("(1-v.p.y*2/viewport.y)*w", "(v.p.y*2/viewport.y-1)*w")

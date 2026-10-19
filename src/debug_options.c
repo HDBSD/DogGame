@@ -32,6 +32,13 @@ uint32_t title_level_id(const char *name)
 int title_options_parse(int argc, const wchar_t *const *argv, char *error, unsigned capacity)
 {
     TitleOptions options = {0};
+#ifdef PREVIEW_VULKAN_FPSGRAPH
+    /* This preview ships with the experimental renderer and timing graph.
+     * The graph uses debug controls, including its in-game toggle. */
+    options.debug = 1;
+    options.vulkan = 1;
+    options.fps_graph = 1;
+#endif
     int requires_debug = 0;
     for (int i = 1; i < argc; i++)
     {
