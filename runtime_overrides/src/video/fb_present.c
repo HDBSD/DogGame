@@ -18,6 +18,7 @@
 #include "../../include/xbox/debug_overlay.h"
 #include "../../include/xbox/display_options.h"
 #include "../../include/xbox/application_identity.h"
+#include "../../include/xbox/renderer_options.h"
 
 #if defined(_WIN32)
 #include <windows.h>
@@ -86,7 +87,7 @@ static void cursor_update(HWND hwnd)
 }
 static const unsigned s_resolutions[][2] = {
     {640,480},{800,600},{1024,768},{1280,720},{1280,960},
-    {1600,900},{1920,1080},{2560,1440}
+    {1600,900},{1920,1080},{2560,1440},{3840,2160}
 };
 static unsigned s_resolution;
 static wchar_t s_display_ini[MAX_PATH];
@@ -94,11 +95,15 @@ static volatile LONG s_internal_resolution;
 static volatile LONG s_resolution_request;
 static volatile LONG s_borderless,s_mode_request;
 static volatile LONG s_internal_scaling;
+static const wchar_t *display_renderer_section(void)
+{
+    return xbox_ExperimentalVulkanSelected() ? L"Vulkan" : L"Display";
+}
 int xbox_DisplayInternalScaling(void) { return s_internal_scaling!=0; }
 void xbox_DisplayInternalScalingSet(int enabled)
 {
     InterlockedExchange(&s_internal_scaling,enabled!=0);
-    if(s_display_ini[0])WritePrivateProfileStringW(L"Display",L"InternalScaling",enabled?L"1":L"0",s_display_ini);
+    if(s_display_ini[0])WritePrivateProfileStringW(display_renderer_section(),L"InternalScaling",enabled?L"1":L"0",s_display_ini);
 }
 static RECT s_windowed_rect;
 int xbox_DisplayBorderless(void) { return s_borderless!=0; }
@@ -147,7 +152,7 @@ int xbox_DisplayFpsCap(void) { return s_fps_cap!=0; }
 void xbox_DisplayFpsCapSet(int enabled)
 {
     InterlockedExchange(&s_fps_cap,enabled!=0);
-    if(s_display_ini[0]) WritePrivateProfileStringW(L"Display",L"FpsCap30",enabled?L"1":L"0",s_display_ini);
+    if(s_display_ini[0]) WritePrivateProfileStringW(display_renderer_section(),L"FpsCap30",enabled?L"1":L"0",s_display_ini);
 }
 /* Limit guest flips, without changing its refresh clock or simulation delta.
  * Use the actual previous presentation time so late frames never produce
@@ -200,7 +205,11 @@ void xbox_DisplayWidescreenSet(int enabled)
 void xbox_MenuOverlayRegister(XboxOverlayDraw draw, XboxOverlayKey key, XboxMenuClick click)
 { s_menu_draw=draw; s_menu_key=key; s_menu_click=click; }
 void xbox_MenuOverlayHoverRegister(XboxMenuHover hover) { s_menu_hover=hover; }
-unsigned xbox_DisplayResolutionCount(void) { return sizeof(s_resolutions)/sizeof(s_resolutions[0]); }
+unsigned xbox_DisplayResolutionCount(void)
+{
+    unsigned count = sizeof(s_resolutions) / sizeof(s_resolutions[0]);
+    return xbox_ExperimentalVulkanSelected() ? count : count - 1;
+}
 unsigned xbox_DisplayResolutionSelected(void) { return s_internal_scaling?(unsigned)s_internal_resolution:s_resolution; }
 void xbox_DisplayResolutionSize(unsigned index, unsigned *width, unsigned *height)
 {
@@ -211,13 +220,15 @@ void xbox_DisplayResolutionSelect(unsigned index)
 {
     if(s_internal_scaling && index<xbox_DisplayResolutionCount()) {
         InterlockedExchange(&s_internal_resolution,index);
-        if(s_display_ini[0]) {wchar_t value[32];_snwprintf(value,32,L"%u",index);WritePrivateProfileStringW(L"Display",L"InternalResolution",value,s_display_ini);}
+        if(s_display_ini[0]) {wchar_t value[32];_snwprintf(value,32,L"%u",index);WritePrivateProfileStringW(display_renderer_section(),L"InternalResolution",value,s_display_ini);}
         return;
     }
     if(index<xbox_DisplayResolutionCount()) InterlockedExchange(&s_resolution_request,(LONG)index+1);
 }
 static void display_load(void)
 {
+    int vulkan = xbox_ExperimentalVulkanSelected();
+    const wchar_t *render_section = display_renderer_section();
     s_resolution=0;
     DWORD n=GetModuleFileNameW(NULL,s_display_ini,MAX_PATH);
     if(!n || n>=MAX_PATH) { s_display_ini[0]=0; return; }
@@ -226,12 +237,12 @@ static void display_load(void)
     wcscpy(slash+1,L"display.ini");
     InterlockedExchange(&s_widescreen,GetPrivateProfileIntW(L"Display",L"Widescreen",0,s_display_ini)==1);
     InterlockedExchange(&s_mouse_interaction,GetPrivateProfileIntW(L"Display",L"MouseInteraction",1,s_display_ini)!=0);
-    InterlockedExchange(&s_fps_cap,GetPrivateProfileIntW(L"Display",L"FpsCap30",0,s_display_ini)!=0);
+    InterlockedExchange(&s_fps_cap,GetPrivateProfileIntW(render_section,L"FpsCap30",vulkan,s_display_ini)!=0);
     InterlockedExchange(&s_dynamic_prompts,GetPrivateProfileIntW(L"Display",L"DynamicButtonPrompts",1,s_display_ini)!=0);
     InterlockedExchange(&s_pause_on_focus_loss, GetPrivateProfileIntW(L"Display", L"PauseOnFocusLoss", 1, s_display_ini) != 0);
     InterlockedExchange(&s_borderless,GetPrivateProfileIntW(L"Display",L"Borderless",0,s_display_ini)!=0);
-    InterlockedExchange(&s_internal_scaling,GetPrivateProfileIntW(L"Display",L"InternalScaling",0,s_display_ini)!=0);
-    unsigned internal=GetPrivateProfileIntW(L"Display",L"InternalResolution",0,s_display_ini);
+    InterlockedExchange(&s_internal_scaling,GetPrivateProfileIntW(render_section,L"InternalScaling",vulkan,s_display_ini)!=0);
+    unsigned internal=GetPrivateProfileIntW(render_section,L"InternalResolution",0,s_display_ini);
     InterlockedExchange(&s_internal_resolution,internal<xbox_DisplayResolutionCount()?internal:0);
     unsigned width=GetPrivateProfileIntW(L"Display",L"Width",640,s_display_ini);
     unsigned height=GetPrivateProfileIntW(L"Display",L"Height",480,s_display_ini);
@@ -293,23 +304,60 @@ static RECT display_view(HWND hwnd)
  *
  * Two buffers and an index, swapped after the copy completes, so the window
  * thread is never reading the one being filled. */
-static uint32_t     *s_present[2];
+static uint32_t     *s_present[3];
 static volatile LONG s_present_idx = -1;   /* -1 until the first flip */
 static SRWLOCK s_present_lock=SRWLOCK_INIT;
-static uint32_t *s_high_present[2];
+static uint32_t *s_high_present[3];
 static const uint32_t *s_high_rgb;
-static size_t s_high_capacity[2];
-static unsigned s_high_width[2],s_high_height[2],s_high_draw_width,s_high_draw_height;
-/* Window thread only, with s_present_lock held shared through every GDI
- * consumer. The publisher owns these snapshots and cannot replace, resize or
- * overwrite them while that lock is held. Borrowing the published image avoids
+static size_t s_high_capacity[3];
+static unsigned s_high_width[3],s_high_height[3],s_high_draw_width,s_high_draw_height;
+static SRWLOCK s_snapshot_slots[3] = {SRWLOCK_INIT, SRWLOCK_INIT, SRWLOCK_INIT};
+static LONG s_borrowed_slot = -1; /* Window thread only. */
+
+/* Vulkan publication uses a free slot instead of waiting for a GDI draw.
+ * Hold the index lock only long enough to lease the current immutable slot.
+ * The original global-lock path remains in use for DirectX/pinned startup. */
+static int acquire_present_snapshot(void)
+{
+    if (s_borrowed_slot >= 0)
+    {
+        return 0;
+    }
+    if (!TryAcquireSRWLockShared(&s_present_lock))
+    {
+        return 0;
+    }
+    if (xbox_ExperimentalVulkanSelected() && s_present_idx >= 0)
+    {
+        s_borrowed_slot = s_present_idx;
+        AcquireSRWLockShared(&s_snapshot_slots[s_borrowed_slot]);
+        ReleaseSRWLockShared(&s_present_lock);
+    }
+    return 1;
+}
+
+static void release_present_snapshot(void)
+{
+    if (s_borrowed_slot >= 0)
+    {
+        ReleaseSRWLockShared(&s_snapshot_slots[s_borrowed_slot]);
+        s_borrowed_slot = -1;
+    }
+    else
+    {
+        ReleaseSRWLockShared(&s_present_lock);
+    }
+}
+/* Window thread only, with the DirectX index lock or a Vulkan slot lease held
+ * through every GDI consumer. The publisher cannot replace, resize or
+ * overwrite that slot while it is borrowed. Borrowing the image avoids
  * another full-resolution allocation and copy per frame. Never retain the
- * pointer after unlocking, including across window message dispatch. */
+ * pointer after releasing ownership, including across message dispatch. */
 static void borrow_high_snapshot(void)
 {
     s_high_rgb = NULL;
     s_high_draw_width = s_high_draw_height = 0;
-    LONG index = s_present_idx;
+    LONG index = s_borrowed_slot >= 0 ? s_borrowed_slot : s_present_idx;
     if (index < 0 || !xbox_DisplayInternalScaling())
     {
         return;
@@ -356,13 +404,39 @@ void xbox_FramebufferWindowPresentHigh(uint32_t fb_va, uint32_t pitch, const uin
     if (getenv("RECOMP_FB_VA"))
         return;                       /* pinned: leave the old path alone */
     display_limit_frame();
-    AcquireSRWLockExclusive(&s_present_lock);
-    next = (s_present_idx == 0) ? 1 : 0;
+    int leased_publication = xbox_ExperimentalVulkanSelected();
+    if (leased_publication)
+    {
+        LONG current = InterlockedCompareExchange(&s_present_idx, 0, 0);
+        for (next = 0; next < 3; next++)
+        {
+            if (next != current && TryAcquireSRWLockExclusive(&s_snapshot_slots[next]))
+            {
+                break;
+            }
+        }
+        if (next == 3)
+        {
+            return;
+        }
+    }
+    else
+    {
+        AcquireSRWLockExclusive(&s_present_lock);
+        next = (s_present_idx == 0) ? 1 : 0;
+    }
     if (!s_present[next]) {
         s_present[next] = (uint32_t *)calloc((size_t)s_fb_width * s_fb_height,
                                              4);
         if (!s_present[next]) {
-            ReleaseSRWLockExclusive(&s_present_lock);
+            if (leased_publication)
+            {
+                ReleaseSRWLockExclusive(&s_snapshot_slots[next]);
+            }
+            else
+            {
+                ReleaseSRWLockExclusive(&s_present_lock);
+            }
             return;
         }
     }
@@ -401,8 +475,16 @@ void xbox_FramebufferWindowPresentHigh(uint32_t fb_va, uint32_t pitch, const uin
     }
     /* Published only once it is whole. */
     if(s_world_capture)s_world_capture();
+    if (leased_publication)
+    {
+        AcquireSRWLockExclusive(&s_present_lock);
+    }
     InterlockedExchange(&s_present_idx, next);
     ReleaseSRWLockExclusive(&s_present_lock);
+    if (leased_publication)
+    {
+        ReleaseSRWLockExclusive(&s_snapshot_slots[next]);
+    }
 }
 
 void xbox_FramebufferWindowPresent(uint32_t fb_va,uint32_t pitch)
@@ -735,13 +817,13 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
             BITMAPINFO bi;memset(&bi,0,sizeof bi);
             bi.bmiHeader.biSize=sizeof(BITMAPINFOHEADER);bi.bmiHeader.biWidth=s_fb_width;bi.bmiHeader.biHeight=-(LONG)s_fb_height;
             bi.bmiHeader.biPlanes=1;bi.bmiHeader.biBitCount=32;bi.bmiHeader.biCompression=BI_RGB;
-            int acquired = TryAcquireSRWLockShared(&s_present_lock);
+            int acquired = acquire_present_snapshot();
             if (acquired) borrow_high_snapshot();
             display_draw(h, (HDC)w, &bi, acquired);
             if (acquired)
             {
                 release_high_snapshot();
-                ReleaseSRWLockShared(&s_present_lock);
+                release_present_snapshot();
             }
         }
         return 0;
@@ -959,13 +1041,13 @@ static void fb_overlay(void)
  * the last coherent background available while input and menus keep updating. */
 static void display_present(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
 {
-    int acquired = TryAcquireSRWLockShared(&s_present_lock);
+    int acquired = acquire_present_snapshot();
     if (acquired) borrow_high_snapshot();
     if (acquired && s_present_idx >= 0 && s_rgb) {
         /* A finished frame, published by the flip. Copied into s_rgb so
          * the dump path and GDI see one consistent image even if the
          * next flip lands mid-blit. */
-        LONG idx = s_present_idx;
+        LONG idx = s_borrowed_slot >= 0 ? s_borrowed_slot : s_present_idx;
         if (s_present[idx])
             memcpy(s_rgb, s_present[idx],
                    (size_t)s_fb_width * s_fb_height * 4);
@@ -982,7 +1064,7 @@ static void display_present(HWND hwnd, HDC hdc, const BITMAPINFO *bi)
     if (acquired)
     {
         release_high_snapshot();
-        ReleaseSRWLockShared(&s_present_lock);
+        release_present_snapshot();
     }
 }
 
@@ -1165,7 +1247,7 @@ static DWORD WINAPI fb_thread(LPVOID unused)
     ReleaseDC(hwnd, hdc);
     DestroyWindow(hwnd);
     release_high_snapshot();
-    for(unsigned i=0;i<2;i++){free(s_high_present[i]);s_high_present[i]=NULL;s_high_capacity[i]=0;}
+    for(unsigned i=0;i<3;i++){free(s_high_present[i]);s_high_present[i]=NULL;s_high_capacity[i]=0;}
     free(s_rgb);
     s_rgb = NULL;
     /* The recompiled guest keeps running on another thread; quitting this

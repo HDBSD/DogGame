@@ -140,3 +140,50 @@ real-driver pixel tests, including subpixel detail, retained depth, CPU edits
 and live size changes. This extends the maintained renderer API; no guest
 routine recovery or generated translation edit is involved. Implementation,
 surface eligibility and transfer/performance limits are in VULKAN_RENDERER.md.
+
+Vulkan 4K follow-up adds runtime-owned resident attachments, native-resolution
+GPU compatibility blits and leased window snapshots. CPU ownership is checked
+against native snapshots; explicit CPU-clear boundaries invalidate matching
+history even when written values are unchanged. No guest reads, fences or
+texture barriers were removed based on guessed use. DirectX retains its
+existing path and defaults, and Vulkan render preferences use their own INI
+section. Real-driver pixel tests and publication concurrency fixtures cover
+these host boundaries. Stationary H001/E006 4K probes approach 30 FPS, but
+measured tail intervals still exceed 33.33 ms; a locked gameplay experience is
+not established. No original title routine was replaced or freshly recovered.
+Future title rendering replacements belong in `src/overrides/`, gated on
+Vulkan selection. VULKAN_RENDERER.md records the reproducible observations.
+
+The subsequent E006 gameplay trace includes approximately 50 ms publication
+intervals at internal 4K and 1,796.92 MiB of depth uploads during its ten-second
+capture. Source inspection identified CPU expansion of changed native depth
+before upload. Vulkan now uploads native color/depth and expands via capability-
+checked nearest GPU blits, with the full-size CPU path retained as fallback.
+Valid physical history is restored with bulk copies. Pixel tests cover payload
+sizes, CPU edits and fallback results. This is host adapter work, not a guest
+rendering reconstruction or proof that every observed stall is fixed; the
+trace measurements and consistency limits are recorded in VULKAN_RENDERER.md.
+
+A second drop trace isolated physical depth-history restoration: 1,835.16 MiB
+crossed the host path in its ten-second capture. Vulkan now retains that
+history in a device-local image and restores it with ordered GPU copies,
+validated against the existing native CPU snapshot. Depth readback packs the
+exact native-selected physical rows rather than using an ambiguous nearest
+blit; the driver fixture caught a tie-sampling mismatch with the existing
+native depth contract. Tests cover eviction/reload with subpixel occlusion,
+zero host upload for restoration, CPU invalidation and uncached row reads.
+Guest readback/notification order and the DirectX path are unchanged. This is
+host resource ownership work, not a new recovery or a confirmed gameplay FPS
+fix. Full measurements and remaining limits are in VULKAN_RENDERER.md.
+
+Vulkan depth ownership now distinguishes color publication from CPU depth
+consumption. This follows inspection of `gpu_begin_batch`, the four-slot
+`zbuf_current` allocator and `nv_vk_sync_reason`, plus the supplied profile;
+it is not a fresh guest-function recovery. Host slot generations and GPU
+content revisions prevent stale publication after reassignment or clear.
+Compatible bindings preserve physical depth and color through GPU copies;
+software access, incompatible layouts and eviction retain native publication.
+Driver fixtures cover CPU edits, slot reuse before submission, shared surfaces,
+clears, eviction and 4K subpixel retention. Measurements and remaining limits
+are recorded in `VULKAN_FRAME_TIME_ROOT_CAUSE.md`. No title rendering routine
+or generated code was replaced.

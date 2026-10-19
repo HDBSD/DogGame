@@ -35,6 +35,17 @@ int main(void)
     puts("Passed: Vulkan requires explicit --debug --vulkan, either order; default/debug-only unchanged; invalid arguments publish no partial options.");
 }
 '''
+video = (root / "runtime_overrides/src/video/fb_present.c").read_text()
+presets = video[video.index("static const unsigned s_resolutions"):video.index("static unsigned s_resolution;")]
+count_function = video[video.index("unsigned xbox_DisplayResolutionCount(void)"):video.index("unsigned xbox_DisplayResolutionSelected(void)")]
+fixture = fixture.replace("int main(void)", presets + "\nstatic int vulkan_selected;\nint xbox_ExperimentalVulkanSelected(void) { return vulkan_selected; }\n" + count_function + "\nint main(void)")
+fixture = fixture.replace('    char error[512];', '''    char error[512];
+    CHECK(xbox_DisplayResolutionCount() == 8);
+    vulkan_selected = 1;
+    CHECK(xbox_DisplayResolutionCount() == 9);
+    CHECK(s_resolutions[8][0] == 3840 && s_resolutions[8][1] == 2160);
+    vulkan_selected = 0;
+    CHECK(xbox_DisplayResolutionCount() == 8);''')
 (out / "renderer_options.c").write_text(fixture)
 project = (out / "apu_irq_harness.vcxproj").read_text()
 project = project.replace("apu_irq_harness.c", "renderer_options.c").replace("obj\\apu_irq\\", "obj\\renderer_options\\")

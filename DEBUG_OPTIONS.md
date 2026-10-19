@@ -172,7 +172,15 @@ device; if it contains the corruption, investigate voice data, decoding or
 mixing. Clipping alone does not prove memory corruption.
 
 
-Recomp Settings includes **30 FPS cap** (OFF by default). ON limits guest frame presentation to 30 FPS without changing the refresh clock or simulation timestep. It cannot raise low FPS. The setting persists as `FpsCap30` in `display.ini`.
+Recomp Settings includes **30 FPS cap** (OFF by default for DirectX, ON for Vulkan). ON limits guest frame presentation to 30 FPS without changing the refresh clock or simulation timestep. It cannot raise low FPS. The setting persists as `FpsCap30` in `display.ini`, under `[Display]` for DirectX and `[Vulkan]` for Vulkan.
+
+Vulkan defaults to **Internal** scaling at the original **640x480**, capped at
+**30 FPS**. Higher resolutions, including 3840x2160, remain selectable. Its internal scaling,
+resolution and frame-cap preferences save under `[Vulkan]`, leaving DirectX's
+existing `[Display]` values alone. The 4K preset is offered only with Vulkan.
+The frame cap does not guarantee that every scene meets the
+frame budget. Measured performance and remaining pacing limits are recorded in
+`VULKAN_RENDERER.md`.
 
 **Pause on focus loss** defaults to ON and is saved as `PauseOnFocusLoss` in
 the `[Display]` section of `display.ini`. Switching to another window requests

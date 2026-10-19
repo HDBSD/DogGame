@@ -1,6 +1,6 @@
 /* Experimental Vulkan raster backend. This consumes the
  * maintained packet executor's NvGpuDraw contract, not recovered game source.
- * Guest memory becomes authoritative again at every synchronization boundary.
+ * Color publication and explicit CPU depth consumers have separate contracts.
  * Vulkan objects and mapped uploads are owned solely by the title thread. */
 #include "nv2a_vulkan.h"
 extern "C"
@@ -94,6 +94,8 @@ namespace
     X(CmdPipelineBarrier) \
     X(CmdCopyBufferToImage) \
     X(CmdCopyImageToBuffer) \
+    X(CmdCopyImage) \
+    X(CmdBlitImage) \
     X(CmdBeginRenderPass) \
     X(CmdEndRenderPass) \
     X(CmdBindPipeline) \
@@ -172,6 +174,43 @@ struct Image
     VkSampler sampler = VK_NULL_HANDLE;
 };
 Image color_image, depth_image;
+Image resolve_color, resolve_depth;
+Image depth_history_image;
+unsigned depth_history_width, depth_history_height;
+uint64_t gpu_depth_history_bytes;
+unsigned resolve_width, resolve_height;
+unsigned color_read_width, color_read_height, depth_read_width, depth_read_height;
+bool native_resolve_supported;
+uint64_t native_resolves;
+uint64_t native_upload_expansions;
+std::vector<double> present_intervals;
+unsigned present_interval_cursor;
+LONGLONG previous_present_tick;
+
+/* Title-thread publication cadence, not monitor scanout timing. Retain a
+ * bounded recent window; a report consumes it without changing rendering. */
+struct PresentInterval
+{
+    ~PresentInterval()
+    {
+        LARGE_INTEGER now, frequency;
+        QueryPerformanceCounter(&now);
+        QueryPerformanceFrequency(&frequency);
+        if (previous_present_tick)
+        {
+            double ms = (now.QuadPart - previous_present_tick) * 1000.0 / frequency.QuadPart;
+            if (present_intervals.size() < 2048)
+            {
+                present_intervals.push_back(ms);
+            }
+            else
+            {
+                present_intervals[present_interval_cursor++ % 2048] = ms;
+            }
+        }
+        previous_present_tick = now.QuadPart;
+    }
+};
 unsigned target_width, target_height;
 std::vector<Image> draw_textures;
 std::vector<Image> retired_textures;
@@ -190,14 +229,165 @@ std::vector<unsigned> indices;
 /* A fence protects uploads, uniform snapshots and vertices until sync. CPU
  * reads use a separate cached buffer: write-combined upload memory can make
  * per-pixel readback orders of magnitude slower even after the GPU is idle. */
-const VkDeviceSize arena_bytes = 64ull * 1024 * 1024;
+/* A fallback/full-history 4K color/depth upload needs ~63 MiB. Leave room for
+ * geometry, constants and texture uploads instead of flushing every draw. */
+const VkDeviceSize arena_bytes = 128ull * 1024 * 1024;
 /* Largest selectable physical target. Guest targets remain limited separately.
  * Color and depth occupy disjoint, fixed-size ranges in the readback buffer. */
-const VkDeviceSize attachment_bytes = 2560ull * 1440 * 4;
+const VkDeviceSize attachment_bytes = 3840ull * 2160 * 4;
 std::vector<uint32_t> present_pixels, present_native;
 const uint8_t *present_guest;
 unsigned present_pitch, present_width, present_height;
-std::vector<float> preserved_depth, preserved_native_depth;
+std::vector<uint32_t> target_native_color;
+std::vector<float> target_native_depth;
+struct ResidentTarget
+{
+    NvGpuDraw state;
+    Image color, depth;
+    VkFramebuffer framebuffer;
+    unsigned width, height;
+    std::vector<uint32_t> native_color;
+    std::vector<float> native_depth;
+    bool pending_depth;
+    uint64_t depth_revision;
+    uint64_t color_revision;
+};
+std::vector<ResidentTarget> resident_targets;
+uint64_t depth_revision, depth_revision_clock;
+uint64_t color_revision, color_revision_clock;
+uint64_t deferred_depth_boundaries, deferred_depth_copies;
+void sync_active_target(const char *reason, bool publish_depth);
+void publish_resident_depth(ResidentTarget &entry);
+
+bool same_depth_allocation(const NvGpuDraw &a, const NvGpuDraw &b)
+{
+    return a.depth == b.depth && a.depth_generation == b.depth_generation;
+}
+
+bool same_depth_layout(const NvGpuDraw &a, const NvGpuDraw &b)
+{
+    return same_depth_allocation(a, b) && a.width == b.width && a.height == b.height &&
+        a.depth_stride == b.depth_stride && a.zscale == b.zscale;
+}
+
+bool depth_cpu_matches(const NvGpuDraw &state, const std::vector<float> &snapshot)
+{
+    if (snapshot.size() != (size_t)state.width * state.height)
+    {
+        return false;
+    }
+    for (unsigned y = 0; state.depth && y < state.height; y++)
+    {
+        if (std::memcmp(state.depth + (size_t)y * state.depth_stride,
+                        snapshot.data() + (size_t)y * state.width, state.width * sizeof(float)))
+        {
+            return false;
+        }
+    }
+    return true;
+}
+uint64_t resident_hits, color_upload_bytes, depth_upload_bytes;
+uint64_t physical_color_restore_bytes, physical_depth_restore_bytes;
+
+bool color_cpu_matches(const NvGpuDraw &state, const std::vector<uint32_t> &snapshot)
+{
+    if (snapshot.size() != (size_t)state.width * state.height)
+    {
+        return false;
+    }
+    for (unsigned y = 0; y < state.height; y++)
+    {
+        if (!state.surface_offset)
+        {
+            if (std::memcmp(state.color + (size_t)y * state.pitch,
+                            snapshot.data() + (size_t)y * state.width, state.width * 4))
+            {
+                return false;
+            }
+        }
+        else
+        {
+            for (unsigned x = 0; x < state.width; x++)
+            {
+                uint32_t value;
+                std::memcpy(&value, state.color + state.surface_offset(state.surface_format, x, y), 4);
+                if (value != snapshot[(size_t)y * state.width + x])
+                {
+                    return false;
+                }
+            }
+        }
+    }
+    return true;
+}
+
+bool native_color_matches(const NvGpuDraw &state)
+{
+    for (const ResidentTarget &entry : resident_targets)
+    {
+        if (entry.state.color == state.color && entry.color_revision > color_revision)
+        {
+            return false;
+        }
+    }
+    return color_cpu_matches(state, target_native_color);
+}
+
+bool native_depth_matches(const NvGpuDraw &state)
+{
+    if (!same_depth_layout(state, target_state))
+    {
+        return false;
+    }
+    for (const ResidentTarget &entry : resident_targets)
+    {
+        if (same_depth_allocation(state, entry.state) && entry.depth_revision > depth_revision)
+        {
+            return false;
+        }
+    }
+    return depth_cpu_matches(state, target_native_depth);
+}
+
+void snapshot_native_target(const NvGpuDraw &state, bool snapshot_color = true, bool snapshot_depth = true)
+{
+    if (snapshot_color)
+    {
+        target_native_color.resize((size_t)state.width * state.height);
+    }
+    if (snapshot_depth)
+    {
+        target_native_depth.resize((size_t)state.width * state.height);
+    }
+    for (unsigned y = 0; y < state.height; y++)
+    {
+        if (snapshot_color && !state.surface_offset)
+        {
+            std::memcpy(target_native_color.data() + (size_t)y * state.width,
+                        state.color + (size_t)y * state.pitch, state.width * 4);
+        }
+        else if (snapshot_color)
+        {
+            for (unsigned x = 0; x < state.width; x++)
+            {
+                std::memcpy(&target_native_color[(size_t)y * state.width + x],
+                            state.color + state.surface_offset(state.surface_format, x, y), 4);
+            }
+        }
+        if (snapshot_depth && state.depth)
+        {
+            std::memcpy(target_native_depth.data() + (size_t)y * state.width,
+                        state.depth + (size_t)y * state.depth_stride, state.width * sizeof(float));
+        }
+    }
+}
+
+bool same_color_target(const NvGpuDraw &a, const NvGpuDraw &b)
+{
+    return a.color == b.color && a.width == b.width && a.height == b.height && a.pitch == b.pitch &&
+           a.surface_format == b.surface_format && a.surface_offset == b.surface_offset;
+}
+std::vector<float> preserved_native_depth;
 const float *preserved_depth_guest;
 unsigned preserved_depth_stride, preserved_depth_width, preserved_depth_height;
 unsigned preserved_depth_guest_width, preserved_depth_guest_height;
@@ -205,8 +395,9 @@ float preserved_depth_zscale;
 
 bool depth_snapshot_matches(const NvGpuDraw &state, unsigned width, unsigned height)
 {
-    if (!state.depth || state.depth != preserved_depth_guest || state.depth_stride != preserved_depth_stride ||
+    if (!depth_history_image.handle || !state.depth || state.depth != preserved_depth_guest || state.depth_stride != preserved_depth_stride ||
         state.zscale != preserved_depth_zscale || width != preserved_depth_width || height != preserved_depth_height ||
+        width != depth_history_width || height != depth_history_height ||
         state.width != preserved_depth_guest_width || state.height != preserved_depth_guest_height)
     {
         return false;
@@ -230,7 +421,7 @@ void physical_target_size(const NvGpuDraw &state, unsigned &width, unsigned &hei
     {
         unsigned selected_width, selected_height;
         xbox_DisplayResolutionSize(xbox_DisplayResolutionSelected(), &selected_width, &selected_height);
-        if (selected_width >= 640 && selected_width <= 2560 && selected_height >= 480 && selected_height <= 1440)
+        if (selected_width >= 640 && selected_width <= 3840 && selected_height >= 480 && selected_height <= 2160)
         {
             width = selected_width;
             height = std::max(1u, (unsigned)((uint64_t)state.height * selected_height / 480));
@@ -554,22 +745,228 @@ void copy_image(const Image &image, VkImageAspectFlags aspect, unsigned width, u
     }
 }
 
+void prepare_native_resolve()
+{
+    if (resolve_width != target_state.width || resolve_height != target_state.height)
+    {
+        destroy_image(resolve_color);
+        destroy_image(resolve_depth);
+        make_image(resolve_color, target_state.width, target_state.height, VK_FORMAT_B8G8R8A8_UNORM,
+                   VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT, VK_IMAGE_ASPECT_COLOR_BIT);
+        make_image(resolve_depth, target_state.width, target_state.height, VK_FORMAT_D32_SFLOAT,
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+        initialize_layout(resolve_color, VK_IMAGE_ASPECT_COLOR_BIT);
+        initialize_layout(resolve_depth, VK_IMAGE_ASPECT_DEPTH_BIT);
+        resolve_width = target_state.width;
+        resolve_height = target_state.height;
+    }
+}
+
+void resolve_to_native(const Image &source, const Image &destination, VkImageAspectFlags aspect)
+{
+    VkImageBlit blit = {};
+    blit.srcSubresource = {aspect, 0, 0, 1};
+    blit.dstSubresource = {aspect, 0, 0, 1};
+    blit.srcOffsets[1] = {(int32_t)target_width, (int32_t)target_height, 1};
+    blit.dstOffsets[1] = {(int32_t)target_state.width, (int32_t)target_state.height, 1};
+    vkCmdBlitImage(command, source.handle, VK_IMAGE_LAYOUT_GENERAL, destination.handle,
+                   VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+    native_resolves++;
+}
+
+void expand_to_physical(const Image &source, const Image &destination, VkImageAspectFlags aspect)
+{
+    /* Reconstruct a changed native guest surface using nearest sampling.
+     * Blit support is checked for both formats before selecting this path.
+     * Physical history is uploaded verbatim instead when it is still valid. */
+    VkImageBlit blit = {};
+    blit.srcSubresource = {aspect, 0, 0, 1};
+    blit.dstSubresource = {aspect, 0, 0, 1};
+    blit.srcOffsets[1] = {(int32_t)target_state.width, (int32_t)target_state.height, 1};
+    blit.dstOffsets[1] = {(int32_t)target_width, (int32_t)target_height, 1};
+    vkCmdBlitImage(command, source.handle, VK_IMAGE_LAYOUT_GENERAL, destination.handle,
+                   VK_IMAGE_LAYOUT_GENERAL, 1, &blit, VK_FILTER_NEAREST);
+    native_upload_expansions++;
+}
+
+void copy_depth_history(const Image &source, const Image &destination, unsigned width, unsigned height)
+{
+    VkImageCopy copy = {};
+    copy.srcSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+    copy.dstSubresource = copy.srcSubresource;
+    copy.extent = {width, height, 1};
+    vkCmdCopyImage(command, source.handle, VK_IMAGE_LAYOUT_GENERAL, destination.handle,
+                   VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+}
+
+void retain_depth_history()
+{
+    if (depth_history_width != target_width || depth_history_height != target_height)
+    {
+        /* Target changes synchronize first, so a differently sized history
+         * image cannot still be referenced by an earlier submission. */
+        destroy_image(depth_history_image);
+        make_image(depth_history_image, target_width, target_height, VK_FORMAT_D32_SFLOAT,
+                   VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT, VK_IMAGE_ASPECT_DEPTH_BIT);
+        initialize_layout(depth_history_image, VK_IMAGE_ASPECT_DEPTH_BIT);
+        depth_history_width = target_width;
+        depth_history_height = target_height;
+    }
+    copy_depth_history(depth_image, depth_history_image, target_width, target_height);
+}
+
+void copy_depth_sample_rows()
+{
+    /* Copy the exact physical rows used by native pixel-center publication.
+     * The driver test's depth blit picked the other texel at a tie; retaining the
+     * physical columns lets the CPU preserve its existing exact X samples.
+     * One command records the selected rows, reducing the 4K payload by 4.5x. */
+    static std::vector<VkBufferImageCopy> rows;
+    rows.resize(target_state.height);
+    for (unsigned y = 0; y < target_state.height; y++)
+    {
+        VkBufferImageCopy &row = rows[y];
+        row = {};
+        row.bufferOffset = attachment_bytes + (VkDeviceSize)y * target_width * 4;
+        row.imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1};
+        row.imageOffset.y = (int32_t)std::min(target_height - 1,
+            (unsigned)(((uint64_t)y * 2 + 1) * target_height / (target_state.height * 2)));
+        row.imageExtent = {target_width, 1, 1};
+    }
+    vkCmdCopyImageToBuffer(command, depth_image.handle, VK_IMAGE_LAYOUT_GENERAL,
+                           readback_buffer, (uint32_t)rows.size(), rows.data());
+}
+
 void ensure_target(const NvGpuDraw &state)
 {
     unsigned width, height;
     physical_target_size(state, width, height);
-    bool same = loaded_target && target_state.color == state.color && target_state.depth == state.depth &&
+    bool same = loaded_target && target_state.color == state.color && same_depth_layout(target_state, state) &&
                 target_state.width == state.width && target_state.height == state.height &&
                 target_state.pitch == state.pitch && target_state.depth_stride == state.depth_stride &&
                 target_state.zscale == state.zscale && target_state.surface_format == state.surface_format &&
                 target_state.surface_offset == state.surface_offset && target_width == width && target_height == height;
-    if (same)
+    if (same && (recording || (native_color_matches(state) && native_depth_matches(state))))
     {
+        begin_commands();
         return;
     }
-    nv_vk_sync_reason("render target switch");
+    nv_vk_sync_color_reason("render target switch");
+    if (color_image.handle && (!same_color_target(target_state, state) || !same_depth_layout(target_state, state) ||
+                              target_width != width || target_height != height))
+    {
+        /* Color is fence-complete and published. Depth may remain authoritative
+         * on the GPU; its CPU snapshot detects an intervening software write. */
+        ResidentTarget saved = {target_state, color_image, depth_image, framebuffer, target_width, target_height,
+                                std::move(target_native_color), std::move(target_native_depth), depth_dirty,
+                                depth_revision, color_revision};
+        resident_targets.push_back(std::move(saved));
+        color_image = {};
+        depth_image = {};
+        framebuffer = VK_NULL_HANDLE;
+        loaded_target = false;
+        depth_dirty = false;
+        depth_revision = 0;
+        color_revision = 0;
+        auto found = std::find_if(resident_targets.begin(), resident_targets.end(),
+            [&](const ResidentTarget &entry)
+            {
+                return entry.width == width && entry.height == height && same_color_target(entry.state, state) &&
+                    same_depth_layout(entry.state, state);
+            });
+        if (found != resident_targets.end())
+        {
+            color_image = found->color;
+            depth_image = found->depth;
+            framebuffer = found->framebuffer;
+            target_state = found->state;
+            target_width = found->width;
+            target_height = found->height;
+            target_native_color = std::move(found->native_color);
+            target_native_depth = std::move(found->native_depth);
+            resident_targets.erase(found);
+            loaded_target = true;
+            depth_dirty = found->pending_depth;
+            depth_revision = found->depth_revision;
+            color_revision = found->color_revision;
+            resident_hits++;
+        }
+        if (resident_targets.size() > 6)
+        {
+            ResidentTarget &old = resident_targets.front();
+            publish_resident_depth(old);
+            vkDestroyFramebuffer(device, old.framebuffer, nullptr);
+            destroy_image(old.color);
+            destroy_image(old.depth);
+            resident_targets.erase(resident_targets.begin());
+        }
+    }
     bool recreate = !color_image.handle || !depth_image.handle || !framebuffer ||
                     target_width != width || target_height != height;
+    bool upload_color = recreate || !loaded_target || !native_color_matches(state);
+    bool upload_depth = recreate || !loaded_target || !native_depth_matches(state);
+    uint64_t newest_color = target_state.color == state.color ? color_revision : 0;
+    uint64_t newest_depth = same_depth_allocation(target_state, state) ? depth_revision : 0;
+    for (const ResidentTarget &entry : resident_targets)
+    {
+        if (entry.state.color == state.color)
+        {
+            newest_color = std::max(newest_color, entry.color_revision);
+        }
+        if (same_depth_allocation(entry.state, state))
+        {
+            newest_depth = std::max(newest_depth, entry.depth_revision);
+        }
+    }
+    Image color_source = {};
+    uint64_t source_color_revision = 0;
+    if (upload_color)
+    {
+        for (const ResidentTarget &entry : resident_targets)
+        {
+            if (same_color_target(state, entry.state) && entry.width == width && entry.height == height &&
+                entry.color_revision == newest_color && entry.color_revision > source_color_revision &&
+                color_cpu_matches(state, entry.native_color))
+            {
+                color_source = entry.color;
+                source_color_revision = entry.color_revision;
+            }
+        }
+    }
+    Image depth_source = {};
+    uint64_t source_revision = 0;
+    if (upload_depth && state.depth)
+    {
+        for (ResidentTarget &entry : resident_targets)
+        {
+            if (entry.pending_depth && same_depth_allocation(state, entry.state) && entry.depth_revision == newest_depth)
+            {
+                if (same_depth_layout(state, entry.state) && entry.width == width && entry.height == height &&
+                    depth_cpu_matches(state, entry.native_depth))
+                {
+                    if (entry.depth_revision > source_revision)
+                    {
+                        depth_source = entry.depth;
+                        source_revision = entry.depth_revision;
+                    }
+                }
+                else
+                {
+                    /* A different depth interpretation needs native values.
+                     * CPU edits supersede the old GPU version instead. */
+                    if (depth_cpu_matches(entry.state, entry.native_depth))
+                    {
+                        publish_resident_depth(entry);
+                    }
+                    else
+                    {
+                        entry.pending_depth = false;
+                        entry.native_depth.clear();
+                    }
+                }
+            }
+        }
+    }
     if (recreate)
     {
         if (framebuffer)
@@ -609,35 +1006,122 @@ void ensure_target(const NvGpuDraw &state)
         initialize_layout(color_image, VK_IMAGE_ASPECT_COLOR_BIT);
         initialize_layout(depth_image, VK_IMAGE_ASPECT_DEPTH_BIT);
     }
-    VkDeviceSize color_offset = allocate_upload((VkDeviceSize)width * height * 4);
-    VkDeviceSize depth_offset = allocate_upload((VkDeviceSize)width * height * 4);
     bool restore_present = width == present_width && height == present_height &&
                            state.height == 480 && present_matches(state.color, state.pitch);
-    bool restore_depth = depth_snapshot_matches(state, width, height);
-    for (unsigned y = 0; y < height; y++)
+    bool restore_depth = !state.depth_generation && depth_snapshot_matches(state, width, height);
+    bool scaled = width != state.width || height != state.height;
+    bool expand_color = scaled && native_resolve_supported && !restore_present;
+    bool expand_depth = scaled && native_resolve_supported && !restore_depth;
+    unsigned color_width = expand_color ? state.width : width;
+    unsigned color_height = expand_color ? state.height : height;
+    unsigned depth_width = expand_depth ? state.width : width;
+    unsigned depth_height = expand_depth ? state.height : height;
+    VkDeviceSize color_offset = upload_color && !color_source.handle ?
+        allocate_upload((VkDeviceSize)color_width * color_height * 4) : 0;
+    VkDeviceSize depth_offset = upload_depth && !restore_depth && !depth_source.handle ?
+        allocate_upload((VkDeviceSize)depth_width * depth_height * 4) : 0;
+    if (upload_color && restore_present && !color_source.handle)
     {
-        unsigned guest_y = height == state.height ? y : (unsigned)((uint64_t)y * state.height / height);
-        for (unsigned x = 0; x < width; x++)
+        std::memcpy(mapped + color_offset, present_pixels.data(), (size_t)width * height * 4);
+        physical_color_restore_bytes += (uint64_t)width * height * 4;
+    }
+    else if (upload_color && !color_source.handle)
+    {
+        for (unsigned y = 0; y < color_height; y++)
         {
-            unsigned guest_x = width == state.width ? x : (unsigned)((uint64_t)x * state.width / width);
-            size_t destination = ((size_t)y * width + x) * 4;
-            size_t source = state.surface_offset ? state.surface_offset(state.surface_format, guest_x, guest_y)
-                                                 : (size_t)guest_y * state.pitch + guest_x * 4;
-            const void *color_source = restore_present ? (const void *)&present_pixels[(size_t)y * width + x]
-                                                       : (const void *)(state.color + source);
-            std::memcpy(mapped + color_offset + destination, color_source, 4);
-            float depth = restore_depth ? preserved_depth[(size_t)y * width + x]
-                : state.depth ? state.depth[(size_t)guest_y * state.depth_stride + guest_x] / state.zscale : 1.f;
-            depth = std::max(0.f, std::min(1.f, depth));
-            std::memcpy(mapped + depth_offset + destination, &depth, 4);
+            unsigned guest_y = color_height == state.height ? y : (unsigned)((uint64_t)y * state.height / color_height);
+            uint8_t *row = mapped + color_offset + (size_t)y * color_width * 4;
+            if (color_width == state.width && !state.surface_offset)
+            {
+                std::memcpy(row, state.color + (size_t)guest_y * state.pitch, color_width * 4);
+            }
+            else
+            {
+                for (unsigned x = 0; x < color_width; x++)
+                {
+                    unsigned guest_x = color_width == state.width ? x : (unsigned)((uint64_t)x * state.width / color_width);
+                    size_t offset = state.surface_offset ? state.surface_offset(state.surface_format, guest_x, guest_y)
+                                                       : (size_t)guest_y * state.pitch + guest_x * 4;
+                    std::memcpy(row + x * 4, state.color + offset, 4);
+                }
+            }
         }
     }
+    if (upload_depth && !restore_depth && !depth_source.handle)
+    {
+        for (unsigned y = 0; y < depth_height; y++)
+        {
+            unsigned guest_y = depth_height == state.height ? y : (unsigned)((uint64_t)y * state.height / depth_height);
+            for (unsigned x = 0; x < depth_width; x++)
+            {
+                unsigned guest_x = depth_width == state.width ? x : (unsigned)((uint64_t)x * state.width / depth_width);
+                float depth = state.depth ? state.depth[(size_t)guest_y * state.depth_stride + guest_x] / state.zscale : 1.f;
+                depth = std::max(0.f, std::min(1.f, depth));
+                std::memcpy(mapped + depth_offset + ((size_t)y * depth_width + x) * 4, &depth, 4);
+            }
+        }
+    }
+    target_state = state;
+    if ((upload_color && expand_color) || (upload_depth && expand_depth))
+    {
+        prepare_native_resolve();
+    }
     memory_barrier();
-    copy_image(color_image, VK_IMAGE_ASPECT_COLOR_BIT, width, height, color_offset, true);
-    copy_image(depth_image, VK_IMAGE_ASPECT_DEPTH_BIT, width, height, depth_offset, true);
+    if (upload_color && color_source.handle)
+    {
+        VkImageCopy copy = {};
+        copy.srcSubresource = copy.dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
+        copy.extent = {width, height, 1};
+        vkCmdCopyImage(command, color_source.handle, VK_IMAGE_LAYOUT_GENERAL, color_image.handle,
+                       VK_IMAGE_LAYOUT_GENERAL, 1, &copy);
+        color_revision = source_color_revision;
+    }
+    else if (upload_color)
+    {
+        copy_image(expand_color ? resolve_color : color_image, VK_IMAGE_ASPECT_COLOR_BIT,
+                   color_width, color_height, color_offset, true);
+        color_upload_bytes += (uint64_t)color_width * color_height * 4;
+    }
+    if (upload_depth && depth_source.handle)
+    {
+        copy_depth_history(depth_source, depth_image, width, height);
+        depth_revision = source_revision;
+        depth_dirty = true;
+        deferred_depth_copies++;
+    }
+    else if (upload_depth && restore_depth)
+    {
+        copy_depth_history(depth_history_image, depth_image, width, height);
+        gpu_depth_history_bytes += (uint64_t)width * height * 4;
+    }
+    else if (upload_depth)
+    {
+        copy_image(expand_depth ? resolve_depth : depth_image, VK_IMAGE_ASPECT_DEPTH_BIT,
+                   depth_width, depth_height, depth_offset, true);
+        depth_upload_bytes += (uint64_t)depth_width * depth_height * 4;
+    }
+    memory_barrier();
+    if (upload_color && expand_color && !color_source.handle)
+    {
+        expand_to_physical(resolve_color, color_image, VK_IMAGE_ASPECT_COLOR_BIT);
+    }
+    if (upload_depth && expand_depth && !depth_source.handle)
+    {
+        expand_to_physical(resolve_depth, depth_image, VK_IMAGE_ASPECT_DEPTH_BIT);
+    }
     memory_barrier();
     target_state = state;
     loaded_target = true;
+    snapshot_native_target(state);
+    if (upload_color && !color_source.handle)
+    {
+        color_revision = ++color_revision_clock;
+    }
+    if (upload_depth && !depth_source.handle)
+    {
+        depth_revision = ++depth_revision_clock;
+        depth_dirty = false;
+    }
 }
 
 VkBlendFactor blend_factor(unsigned value, bool alpha)
@@ -683,7 +1167,7 @@ VkPipeline pipeline_for(const NvGpuDraw &state)
     /* Retiring a pipeline requires its queued uses to finish. */
     if (pipelines.size() >= 256)
     {
-        nv_vk_sync_reason("pipeline cache budget");
+        nv_vk_sync_color_reason("pipeline cache budget");
         for (const Pipeline &pipeline : pipelines)
         {
             vkDestroyPipeline(device, pipeline.handle, nullptr);
@@ -894,6 +1378,9 @@ unsigned initialize_device()
             {
                 physical = candidate;
                 properties = candidate_properties;
+                VkFormatFeatureFlags blit = VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+                native_resolve_supported = (color_format.optimalTilingFeatures & blit) == blit &&
+                                          (depth_format.optimalTilingFeatures & blit) == blit;
                 queue_family = i;
                 best_score = score;
             }
@@ -1056,6 +1543,7 @@ void initialize_render_resources()
 void publish_attachments()
 {
     CpuTimer timer(publish_ticks);
+    const unsigned read_width = color_read_width, read_height = color_read_height;
     if (!(color_dirty || depth_dirty))
     {
         return;
@@ -1074,7 +1562,7 @@ void publish_attachments()
      * before scalar depth/layout processing, never one PCIe/cache-line fetch
      * per guest pixel. These snapshots are title-thread owned. */
     static std::vector<uint8_t> color_snapshot, depth_snapshot;
-    size_t bytes = (size_t)target_width * target_height * 4;
+    size_t bytes = (size_t)read_width * read_height * 4;
     if (!(readback_memory_flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT))
     {
         if (color_dirty)
@@ -1085,8 +1573,9 @@ void publish_attachments()
         }
         if (depth_dirty)
         {
-            depth_snapshot.resize(bytes);
-            std::memcpy(depth_snapshot.data(), depth_source, bytes);
+            size_t depth_bytes = (size_t)depth_read_width * depth_read_height * 4;
+            depth_snapshot.resize(depth_bytes);
+            std::memcpy(depth_snapshot.data(), depth_source, depth_bytes);
             depth_source = depth_snapshot.data();
         }
     }
@@ -1094,10 +1583,10 @@ void publish_attachments()
     {
         for (unsigned y = 0; y < target_state.height; y++)
         {
-            unsigned source_y = target_height == target_state.height ? y : std::min(target_height - 1,
-                (unsigned)(((uint64_t)y * 2 + 1) * target_height / (target_state.height * 2)));
-            const uint8_t *row = color_source + (size_t)source_y * target_width * 4;
-            if (!target_state.surface_offset && target_width == target_state.width)
+            unsigned source_y = read_height == target_state.height ? y : std::min(read_height - 1,
+                (unsigned)(((uint64_t)y * 2 + 1) * read_height / (target_state.height * 2)));
+            const uint8_t *row = color_source + (size_t)source_y * read_width * 4;
+            if (!target_state.surface_offset && read_width == target_state.width)
             {
                 std::memcpy(target_state.color + (size_t)y * target_state.pitch, row, target_state.width * 4);
             }
@@ -1105,8 +1594,8 @@ void publish_attachments()
             {
                 for (unsigned x = 0; x < target_state.width; x++)
                 {
-                    unsigned source_x = target_width == target_state.width ? x : std::min(target_width - 1,
-                        (unsigned)(((uint64_t)x * 2 + 1) * target_width / (target_state.width * 2)));
+                    unsigned source_x = read_width == target_state.width ? x : std::min(read_width - 1,
+                        (unsigned)(((uint64_t)x * 2 + 1) * read_width / (target_state.width * 2)));
                     size_t destination = target_state.surface_offset
                         ? target_state.surface_offset(target_state.surface_format, x, y)
                         : (size_t)y * target_state.pitch + x * 4;
@@ -1122,11 +1611,11 @@ void publish_attachments()
             for (unsigned x = 0; x < target_state.width; x++)
             {
                 float z;
-                unsigned source_x = target_width == target_state.width ? x : std::min(target_width - 1,
-                    (unsigned)(((uint64_t)x * 2 + 1) * target_width / (target_state.width * 2)));
-                unsigned source_y = target_height == target_state.height ? y : std::min(target_height - 1,
-                    (unsigned)(((uint64_t)y * 2 + 1) * target_height / (target_state.height * 2)));
-                std::memcpy(&z, depth_source + ((size_t)source_y * target_width + source_x) * 4, 4);
+                unsigned source_x = depth_read_width == target_state.width ? x : std::min(depth_read_width - 1,
+                    (unsigned)(((uint64_t)x * 2 + 1) * depth_read_width / (target_state.width * 2)));
+                unsigned source_y = depth_read_height == target_state.height ? y : std::min(depth_read_height - 1,
+                    (unsigned)(((uint64_t)y * 2 + 1) * depth_read_height / (target_state.height * 2)));
+                std::memcpy(&z, depth_source + ((size_t)source_y * depth_read_width + source_x) * 4, 4);
                 float &old = target_state.depth[(size_t)y * target_state.depth_stride + x];
                 /* Match the maintained D3D readback sentinel behavior. */
                 if (z != 1.f || old <= target_state.zscale)
@@ -1137,12 +1626,12 @@ void publish_attachments()
         }
     }
     if (color_dirty && target_state.width == 640 && target_state.height == 480 &&
-        !target_state.surface_offset && (target_width != 640 || target_height != 480))
+        !target_state.surface_offset && (read_width != 640 || read_height != 480))
     {
         /* Preserve the physical raster before the copied window publication.
          * Its native image validates CPU ownership at both reload and present.
          * No mapped Vulkan storage or guest pointer escapes to the UI thread. */
-        present_pixels.resize((size_t)target_width * target_height);
+        present_pixels.resize((size_t)read_width * read_height);
         std::memcpy(present_pixels.data(), color_source, bytes);
         present_native.resize(640 * 480);
         for (unsigned y = 0; y < 480; y++)
@@ -1152,8 +1641,8 @@ void publish_attachments()
         }
         present_guest = target_state.color;
         present_pitch = target_state.pitch;
-        present_width = target_width;
-        present_height = target_height;
+        present_width = read_width;
+        present_height = read_height;
     }
     else if (color_dirty && target_state.color == present_guest)
     {
@@ -1162,8 +1651,6 @@ void publish_attachments()
     if (depth_dirty && target_state.depth &&
         (target_width != target_state.width || target_height != target_state.height))
     {
-        preserved_depth.resize((size_t)target_width * target_height);
-        std::memcpy(preserved_depth.data(), depth_source, bytes);
         preserved_native_depth.resize((size_t)target_state.width * target_state.height);
         for (unsigned y = 0; y < target_state.height; y++)
         {
@@ -1233,6 +1720,9 @@ void validate_mirrored_clears()
         /* The cleared attachment is already marked clean. Publishing the
          * other attachment cannot overwrite the CPU edit; force a reload. */
         nv_vk_sync_reason("CPU edit after mirrored clear");
+        loaded_target = false;
+        target_native_color.clear();
+        target_native_depth.clear();
     }
 }
 
@@ -1289,7 +1779,7 @@ int nv_vk_begin(const NvGpuDraw *state)
         validate_mirrored_clears();
         if (cached_textures.size() >= 256 || cached_texture_bytes >= 128ull * 1024 * 1024)
         {
-            nv_vk_sync_reason("texture cache budget");
+            nv_vk_sync_color_reason("texture cache budget");
             clear_texture_cache();
         }
         NvGpuTexture textures[4] = {};
@@ -1354,7 +1844,7 @@ int nv_vk_begin(const NvGpuDraw *state)
         }
         if (cursor + texture_bytes + 8 * 1024 * 1024 > arena_bytes || draw_sets >= 512)
         {
-            nv_vk_sync_reason("upload or descriptor budget");
+            nv_vk_sync_color_reason("upload or descriptor budget");
         }
         draw_pipeline = pipeline_for(s);
         ensure_target(s);
@@ -1485,7 +1975,7 @@ void nv_vk_end(void)
             std::vector<NvGpuVertex> saved_vertices = std::move(vertices);
             std::vector<unsigned> saved_indices = std::move(indices);
             NvGpuDraw saved_draw = draw_state;
-            nv_vk_sync_reason("geometry upload budget");
+            nv_vk_sync_color_reason("geometry upload budget");
             if (!nv_vk_begin(&saved_draw))
             {
                 throw std::runtime_error("Cannot resume Vulkan geometry after arena flush");
@@ -1520,7 +2010,15 @@ void nv_vk_end(void)
                                 &draw_descriptor, 0, nullptr);
         vkCmdDraw(command, (uint32_t)indices.size(), 1, 0, 0);
         color_dirty = color_dirty || (draw_state.mask & 0x01010101u) != 0;
+        if (draw_state.mask & 0x01010101u)
+        {
+            color_revision = ++color_revision_clock;
+        }
         depth_dirty = depth_dirty || draw_state.depth_write;
+        if (draw_state.depth_write)
+        {
+            depth_revision = ++depth_revision_clock;
+        }
         batches++;
         triangles += indices.size() / 3;
         if (++segment_draws >= draws_per_submission)
@@ -1543,15 +2041,56 @@ void nv_vk_sync(void)
 
 const uint32_t *nv_vk_present_image(const uint8_t *guest, unsigned pitch, unsigned *width, unsigned *height)
 {
-    if (!xbox_DisplayInternalScaling() || !present_matches(guest, pitch))
+    PresentInterval interval;
+    if (!xbox_DisplayInternalScaling())
     {
         return nullptr;
     }
     unsigned selected_width, selected_height;
     xbox_DisplayResolutionSize(xbox_DisplayResolutionSelected(), &selected_width, &selected_height);
-    if (present_width != selected_width || present_height != selected_height)
+    if (selected_width == 640 && selected_height == 480)
     {
         return nullptr;
+    }
+    if (!present_matches(guest, pitch) || present_width != selected_width || present_height != selected_height)
+    {
+        /* Intermediate guest readers need only native pixels. Materialize the
+         * physical color once, at presentation, from a validated resident
+         * image even if another target is currently bound. */
+        NvGpuDraw state = {};
+        if (loaded_target && target_state.color == guest && target_state.pitch == pitch &&
+            target_state.width == 640 && target_state.height == 480 && native_color_matches(target_state))
+        {
+            state = target_state;
+        }
+        else
+        {
+            for (const ResidentTarget &entry : resident_targets)
+            {
+                if (entry.state.color != guest || entry.state.pitch != pitch || entry.state.width != 640 ||
+                    entry.state.height != 480 || entry.state.surface_offset || entry.native_color.size() != 640 * 480)
+                {
+                    continue;
+                }
+                bool matches = true;
+                for (unsigned y = 0; y < 480 && matches; y++)
+                {
+                    matches = !std::memcmp(guest + (size_t)y * pitch, entry.native_color.data() + y * 640, 640 * 4);
+                }
+                if (matches)
+                {
+                    state = entry.state;
+                    break;
+                }
+            }
+        }
+        if (!state.color)
+        {
+            return nullptr;
+        }
+        ensure_target(state);
+        color_dirty = true;
+        nv_vk_sync_color_reason("presentation");
     }
     *width = present_width;
     *height = present_height;
@@ -1560,6 +2099,24 @@ const uint32_t *nv_vk_present_image(const uint8_t *guest, unsigned pitch, unsign
 
 void nv_vk_discard_snapshots(const uint8_t *color, const float *depth)
 {
+    if ((color && color == target_state.color) || (depth && depth == target_state.depth))
+    {
+        loaded_target = false;
+        target_native_color.clear();
+        target_native_depth.clear();
+    }
+    for (ResidentTarget &entry : resident_targets)
+    {
+        if (color && color == entry.state.color)
+        {
+            entry.native_color.clear();
+        }
+        if (depth && depth == entry.state.depth)
+        {
+            entry.native_depth.clear();
+            entry.pending_depth = false;
+        }
+    }
     if (color && color == present_guest)
     {
         present_guest = nullptr;
@@ -1570,8 +2127,71 @@ void nv_vk_discard_snapshots(const uint8_t *color, const float *depth)
     }
 }
 
+void nv_vk_prepare_cpu_clear(const uint8_t *color, unsigned pitch, unsigned format,
+                             unsigned x, unsigned y, unsigned width, unsigned height,
+                             const float *depth)
+{
+    /* Texture sources have already been copied into backend-owned uploads.
+     * A validated linear color clear and an unrelated host depth buffer cannot
+     * consume or overwrite this active target. Pooled targets are already
+     * fence-complete. Keep recording instead of flushing unrelated rendering.
+     * A null color is deliberately conservative: partial-channel clears can
+     * reach the dispatcher without a validated color pointer. */
+    if (loaded_target && color && !format && !target_state.surface_format &&
+        depth != target_state.depth && pitch && height && target_state.pitch)
+    {
+        uint64_t clear_begin = (uintptr_t)color;
+        uint64_t clear_end = clear_begin + ((uint64_t)y + height) * pitch +
+            ((uint64_t)x + width) * 4;
+        uint64_t target_begin = (uintptr_t)target_state.color;
+        uint64_t target_end = target_begin + (uint64_t)target_state.height * target_state.pitch;
+        if (clear_end >= clear_begin && target_end >= target_begin &&
+            (clear_end <= target_begin || target_end <= clear_begin))
+        {
+            nv_vk_discard_snapshots(color, depth);
+            return;
+        }
+    }
+    /* The executor's zbuf_clear overwrites its complete 1024x1024 host buffer.
+     * clear_surface overwrites the supplied color rectangle. Reading the old
+     * values back first serves no consumer, but unrelated attachment writes
+     * must still be published before the CPU runs. This does not remove the
+     * fence or permit reuse of resources while GPU commands are in flight. */
+    if (loaded_target)
+    {
+        if (depth && depth == target_state.depth)
+        {
+            depth_dirty = false;
+        }
+        if (color && color == target_state.color && pitch == target_state.pitch &&
+            format == target_state.surface_format && !x && !y &&
+            width >= target_state.width && height >= target_state.height)
+        {
+            color_dirty = false;
+        }
+    }
+    nv_vk_sync_reason("unsupported CPU clear");
+    nv_vk_discard_snapshots(color, depth);
+}
+
 int nv_vk_clear_attachments(const NvGpuClear *clear)
 {
+    if (clear && clear->color && (!loaded_target || clear->color != target_state.color) &&
+        !clear->x && !clear->y)
+    {
+        auto found = std::find_if(resident_targets.begin(), resident_targets.end(),
+            [&](const ResidentTarget &entry)
+            {
+                return entry.state.color == clear->color && entry.state.pitch == clear->pitch &&
+                    entry.state.surface_format == clear->format && clear->width >= entry.state.width &&
+                    clear->height >= entry.state.height && (!clear->depth || clear->depth == entry.state.depth);
+            });
+        if (found != resident_targets.end())
+        {
+            NvGpuDraw state = found->state;
+            ensure_target(state);
+        }
+    }
     if (!clear || !loaded_target || (!clear->color && !clear->depth))
     {
         return 0;
@@ -1590,6 +2210,7 @@ int nv_vk_clear_attachments(const NvGpuClear *clear)
      * Discard only the overwritten dirty attachment; retain unrelated writes.
      * All recording happens outside a render pass on the title thread. */
     end_render_pass();
+    begin_commands();
     memory_barrier();
     if (clear->color)
     {
@@ -1602,7 +2223,15 @@ int nv_vk_clear_attachments(const NvGpuClear *clear)
         VkImageSubresourceRange range = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
         vkCmdClearColorImage(command, color_image.handle, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
         color_dirty = false;
+        color_revision = ++color_revision_clock;
         mirrored_color_clear = true;
+        for (ResidentTarget &entry : resident_targets)
+        {
+            if (entry.state.color == clear->color)
+            {
+                entry.native_color.clear();
+            }
+        }
         mirrored_color_value = clear->color_value;
         gpu_color_clears++;
     }
@@ -1617,6 +2246,15 @@ int nv_vk_clear_attachments(const NvGpuClear *clear)
         VkImageSubresourceRange range = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 1, 0, 1};
         vkCmdClearDepthStencilImage(command, depth_image.handle, VK_IMAGE_LAYOUT_GENERAL, &value, 1, &range);
         depth_dirty = false;
+        depth_revision = ++depth_revision_clock;
+        for (ResidentTarget &entry : resident_targets)
+        {
+            if (entry.state.depth == clear->depth)
+            {
+                entry.pending_depth = false;
+                entry.native_depth.clear();
+            }
+        }
         mirrored_depth_clear = true;
         mirrored_depth_value = clear->depth_value;
         gpu_depth_clears++;
@@ -1625,26 +2263,68 @@ int nv_vk_clear_attachments(const NvGpuClear *clear)
     return 1;
 }
 
-void nv_vk_sync_reason(const char *reason)
+namespace
+{
+void sync_active_target(const char *reason, bool publish_depth)
 {
     if (!recording)
     {
-        return;
+        if (!publish_depth || !depth_dirty)
+        {
+            return;
+        }
+        begin_commands();
     }
     try
     {
+        bool retained_depth = depth_dirty && !publish_depth;
+        if (retained_depth)
+        {
+            depth_dirty = false;
+            deferred_depth_boundaries++;
+        }
         uint64_t wait_before = wait_ticks;
         end_render_pass();
         memory_barrier();
+        bool scaled = target_width != target_state.width || target_height != target_state.height;
+        if (depth_dirty && target_state.depth && scaled)
+        {
+            retain_depth_history();
+            memory_barrier();
+        }
+        bool resolve_native = native_resolve_supported &&
+            scaled &&
+            std::strcmp(reason, "presentation") && std::strcmp(reason, "diagnostic screenshot") &&
+            std::strcmp(reason, "explicit boundary");
+        color_read_width = resolve_native ? target_state.width : target_width;
+        color_read_height = resolve_native ? target_state.height : target_height;
+        depth_read_width = target_width;
+        depth_read_height = target_state.height;
+        if (resolve_native && color_dirty)
+        {
+            prepare_native_resolve();
+            if (resolve_native && color_dirty)
+            {
+                resolve_to_native(color_image, resolve_color, VK_IMAGE_ASPECT_COLOR_BIT);
+            }
+            memory_barrier();
+        }
         if (color_dirty)
         {
-            copy_image(color_image, VK_IMAGE_ASPECT_COLOR_BIT, target_width, target_height, 0,
+            copy_image(resolve_native ? resolve_color : color_image, VK_IMAGE_ASPECT_COLOR_BIT, color_read_width, color_read_height, 0,
                        false);
         }
         if (depth_dirty)
         {
-            copy_image(depth_image, VK_IMAGE_ASPECT_DEPTH_BIT, target_width, target_height,
-                       attachment_bytes, false);
+            if (target_height != target_state.height)
+            {
+                copy_depth_sample_rows();
+            }
+            else
+            {
+                copy_image(depth_image, VK_IMAGE_ASPECT_DEPTH_BIT, depth_read_width, depth_read_height,
+                           attachment_bytes, false);
+            }
         }
         VkMemoryBarrier host = {};
         host.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER;
@@ -1676,16 +2356,37 @@ void nv_vk_sync_reason(const char *reason)
         }
         row->calls++;
         row->wait += wait_ticks - wait_before;
-        uint64_t bytes = (uint64_t)target_width * target_height * 4;
+        uint64_t bytes = (uint64_t)color_read_width * color_read_height * 4;
         if (color_dirty)
         {
             row->color_bytes += bytes;
         }
         if (depth_dirty)
         {
-            row->depth_bytes += bytes;
+            row->depth_bytes += (uint64_t)depth_read_width * depth_read_height * 4;
         }
         publish_attachments();
+        if (color_dirty)
+        {
+            for (ResidentTarget &entry : resident_targets)
+            {
+                if (entry.state.color == target_state.color && entry.color_revision < color_revision)
+                {
+                    entry.native_color.clear();
+                }
+            }
+        }
+        if (depth_dirty)
+        {
+            for (ResidentTarget &entry : resident_targets)
+            {
+                if (same_depth_allocation(entry.state, target_state) && entry.depth_revision < depth_revision)
+                {
+                    entry.pending_depth = false;
+                    entry.native_depth.clear();
+                }
+            }
+        }
         if (color_dirty || depth_dirty)
         {
             readbacks++;
@@ -1707,7 +2408,9 @@ void nv_vk_sync_reason(const char *reason)
         retired_textures.clear();
         cursor = 0;
         draw_sets = 0;
-        recording = loaded_target = color_dirty = depth_dirty = false;
+        snapshot_native_target(target_state, color_dirty || mirrored_color_clear, depth_dirty || mirrored_depth_clear);
+        recording = color_dirty = depth_dirty = false;
+        depth_dirty = retained_depth;
         mirrored_color_clear = mirrored_depth_clear = false;
     }
     catch (const std::exception &failure)
@@ -1716,8 +2419,129 @@ void nv_vk_sync_reason(const char *reason)
     }
 }
 
+void publish_resident_depth(ResidentTarget &entry)
+{
+    if (!entry.pending_depth)
+    {
+        return;
+    }
+    if (same_depth_allocation(target_state, entry.state) && depth_revision > entry.depth_revision)
+    {
+        entry.pending_depth = false;
+        entry.native_depth.clear();
+        return;
+    }
+    for (const ResidentTarget &other : resident_targets)
+    {
+        if (same_depth_allocation(other.state, entry.state) && other.depth_revision > entry.depth_revision)
+        {
+            entry.pending_depth = false;
+            entry.native_depth.clear();
+            return;
+        }
+    }
+    /* Called only after active color work has reached its fence. Resource
+     * handles remain owned by their original entry across this temporary bind. */
+    auto exchange = [&]()
+    {
+        std::swap(target_state, entry.state);
+        std::swap(color_image, entry.color);
+        std::swap(depth_image, entry.depth);
+        std::swap(framebuffer, entry.framebuffer);
+        std::swap(target_width, entry.width);
+        std::swap(target_height, entry.height);
+        target_native_color.swap(entry.native_color);
+        target_native_depth.swap(entry.native_depth);
+        std::swap(depth_dirty, entry.pending_depth);
+        std::swap(depth_revision, entry.depth_revision);
+        std::swap(color_revision, entry.color_revision);
+    };
+    bool was_loaded = loaded_target;
+    exchange();
+    loaded_target = true;
+    sync_active_target("CPU depth consumer", true);
+    exchange();
+    loaded_target = was_loaded;
+}
+} // namespace
+
+void nv_vk_sync_reason(const char *reason)
+{
+    for (const ResidentTarget &entry : resident_targets)
+    {
+        if (same_depth_allocation(target_state, entry.state) && entry.depth_revision > depth_revision)
+        {
+            depth_dirty = false;
+        }
+    }
+    sync_active_target(reason, true);
+    for (ResidentTarget &entry : resident_targets)
+    {
+        publish_resident_depth(entry);
+    }
+}
+
+void nv_vk_sync_color_reason(const char *reason)
+{
+    sync_active_target(reason, false);
+}
+
+void nv_vk_depth_slot_reused(const float *depth)
+{
+    /* The old guest allocation is no longer represented by this CPU slot.
+     * Recorded GPU commands own images, never the float buffer. Keep those
+     * images alive through their existing fences, but never publish them into
+     * the replacement allocation. The new generation prevents cache aliasing. */
+    if (target_state.depth == depth)
+    {
+        depth_dirty = false;
+        target_native_depth.clear();
+    }
+    for (ResidentTarget &entry : resident_targets)
+    {
+        if (entry.state.depth == depth)
+        {
+            entry.pending_depth = false;
+            entry.native_depth.clear();
+        }
+    }
+    if (preserved_depth_guest == depth)
+    {
+        preserved_depth_guest = nullptr;
+    }
+}
+
 void nv_vk_report(void)
 {
+    std::fprintf(stderr, "[GPU-VULKAN-DEPTH-OWNERSHIP] deferred=%llu gpu-copies=%llu\n",
+                 (unsigned long long)deferred_depth_boundaries, (unsigned long long)deferred_depth_copies);
+    if (!present_intervals.empty())
+    {
+        std::sort(present_intervals.begin(), present_intervals.end());
+        double sum = 0;
+        unsigned late = 0;
+        for (double ms : present_intervals)
+        {
+            sum += ms;
+            if (ms > 36.667)
+            {
+                late++;
+            }
+        }
+        size_t n = present_intervals.size();
+        std::fprintf(stderr, "[GPU-VULKAN-PACING] recent=%zu mean=%.3f ms p95=%.3f ms p99=%.3f ms max=%.3f ms over36.667=%u; title publication, not scanout\n",
+            n, sum / n, present_intervals[(n - 1) * 95 / 100], present_intervals[(n - 1) * 99 / 100],
+            present_intervals.back(), late);
+        present_intervals.clear();
+        present_interval_cursor = 0;
+    }
+    std::fprintf(stderr, "[GPU-VULKAN-RESIDENT] hits=%llu pooled=%zu color-upload=%.2f MiB depth-upload=%.2f MiB\n",
+        (unsigned long long)resident_hits, resident_targets.size(), color_upload_bytes / 1048576.0, depth_upload_bytes / 1048576.0);
+    std::fprintf(stderr, "[GPU-VULKAN-RESOLVE] supported=%d attachments=%llu upload-expansions=%llu\n", native_resolve_supported,
+        (unsigned long long)native_resolves, (unsigned long long)native_upload_expansions);
+    std::fprintf(stderr, "[GPU-VULKAN-HISTORY] physical-color-restored=%.2f MiB physical-depth-restored=%.2f MiB gpu-depth-restored=%.2f MiB\n",
+        physical_color_restore_bytes / 1048576.0, physical_depth_restore_bytes / 1048576.0,
+        gpu_depth_history_bytes / 1048576.0);
     LARGE_INTEGER frequency;
     QueryPerformanceFrequency(&frequency);
     double milliseconds = 1000.0 / frequency.QuadPart;
@@ -1758,7 +2582,7 @@ void nv_vk_texture_barrier(const uint8_t *data, uint64_t bytes)
      * conservatively rather than infer an allocation size from row pitch. */
     if (target_state.surface_offset)
     {
-        nv_vk_sync_reason("nonlinear texture read");
+        nv_vk_sync_color_reason("nonlinear texture read");
         return;
     }
     uintptr_t source = (uintptr_t)data;
@@ -1767,7 +2591,7 @@ void nv_vk_texture_barrier(const uint8_t *data, uint64_t bytes)
     bool overlaps = source >= target ? source - target < span : target - source < bytes;
     if (overlaps)
     {
-        nv_vk_sync_reason("render-target texture read");
+        nv_vk_sync_color_reason("render-target texture read");
     }
 }
 
@@ -1782,6 +2606,13 @@ void nv_vk_shutdown(void)
             nv_vk_sync_reason("shutdown");
         }
         vkDeviceWaitIdle(device);
+        for (ResidentTarget &entry : resident_targets)
+        {
+            vkDestroyFramebuffer(device, entry.framebuffer, nullptr);
+            destroy_image(entry.color);
+            destroy_image(entry.depth);
+        }
+        resident_targets.clear();
         for (Image &image : retired_textures)
         {
             destroy_image(image);
@@ -1803,6 +2634,9 @@ void nv_vk_shutdown(void)
         }
         destroy_image(color_image);
         destroy_image(depth_image);
+        destroy_image(resolve_color);
+        destroy_image(resolve_depth);
+        destroy_image(depth_history_image);
         for (const Pipeline &pipeline : pipelines)
         {
             vkDestroyPipeline(device, pipeline.handle, nullptr);
@@ -1893,15 +2727,23 @@ void nv_vk_shutdown(void)
     readback_memory_flags = 0;
     fence = VK_NULL_HANDLE;
     recording = loaded_target = color_dirty = depth_dirty = false;
+    depth_revision = 0;
+    color_revision = 0;
     render_pass_open = false;
     mirrored_color_clear = mirrored_depth_clear = false;
     target_width = target_height = 0;
+    previous_present_tick = 0;
+    present_intervals.clear();
+    present_interval_cursor = 0;
+    resolve_width = resolve_height = 0;
+    depth_history_width = depth_history_height = 0;
+    target_native_color.clear();
+    target_native_depth.clear();
     present_guest = nullptr;
     present_pitch = present_width = present_height = 0;
     present_pixels.clear();
     present_native.clear();
     preserved_depth_guest = nullptr;
-    preserved_depth.clear();
     preserved_native_depth.clear();
     cursor = 0;
     draw_sets = 0;

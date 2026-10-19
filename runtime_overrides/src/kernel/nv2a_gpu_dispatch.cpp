@@ -6,6 +6,11 @@
  * implementation is selected; packet decoding continues to use nv_gpu_*. */
 static bool use_vulkan;
 
+int xbox_ExperimentalVulkanSelected(void)
+{
+    return use_vulkan;
+}
+
 extern "C"
 {
     int nv_d3d11_enabled(void);
@@ -122,15 +127,33 @@ void nv_gpu_sync_depth(const char *reason)
     }
 }
 
-void nv_gpu_prepare_depth_change(const uint8_t *color)
+void nv_gpu_sync_color_reason(const char *reason)
 {
     if (use_vulkan)
     {
-        nv_vk_sync_reason("depth attachment change");
+        nv_vk_sync_color_reason(reason);
     }
     else
     {
+        nv_d3d11_sync_reason(reason);
+    }
+}
+
+void nv_gpu_prepare_depth_change(const uint8_t *color)
+{
+    /* Vulkan binds a different depth image without a CPU depth consumer.
+     * ensure_target preserves its GPU contents and allocation lifetime. */
+    if (!use_vulkan)
+    {
         nv_d3d11_prepare_depth_change(color);
+    }
+}
+
+void nv_gpu_depth_slot_reused(const float *depth)
+{
+    if (use_vulkan)
+    {
+        nv_vk_depth_slot_reused(depth);
     }
 }
 
@@ -141,8 +164,7 @@ void nv_gpu_discard_overwritten(const uint8_t *color, unsigned pitch, unsigned f
      * can instead be mirrored by nv_gpu_clear_attachments below. */
     if (use_vulkan)
     {
-        nv_vk_sync_reason("unsupported CPU clear");
-        nv_vk_discard_snapshots(color, depth);
+        nv_vk_prepare_cpu_clear(color, pitch, format, x, y, width, height, depth);
     }
     else
     {
@@ -153,6 +175,13 @@ void nv_gpu_discard_overwritten(const uint8_t *color, unsigned pitch, unsigned f
 int nv_gpu_clear_attachments(const NvGpuClear *clear)
 {
     return use_vulkan ? nv_vk_clear_attachments(clear) : nv_d3d11_clear_attachments(clear);
+}
+
+int nv_gpu_prepare_cpu_clear(const uint8_t *color, unsigned pitch, unsigned format,
+                             unsigned x, unsigned y, unsigned width, unsigned height, const float *depth)
+{
+    nv_gpu_discard_overwritten(color, pitch, format, x, y, width, height, depth);
+    return use_vulkan ? 1 : 0;
 }
 
 const uint32_t *nv_gpu_present_image(const uint8_t *guest, unsigned pitch, unsigned *width, unsigned *height)

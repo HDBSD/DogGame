@@ -11,6 +11,8 @@ extern "C"
      * Returns zero with an error on unavailable loader/device; never silently
      * substitutes D3D11 for an explicitly requested Vulkan backend. */
     int xbox_SelectExperimentalVulkan(char *error, unsigned capacity);
+    /* Immutable after startup; safe for display settings queries. */
+    int xbox_ExperimentalVulkanSelected(void);
 
 #ifdef __cplusplus
 }

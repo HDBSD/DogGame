@@ -43,6 +43,8 @@
 #else
 #define nv_gpu_sync() ((void)0)
 #define nv_gpu_sync_reason(reason) ((void)0)
+#define nv_gpu_sync_color_reason(reason) ((void)0)
+#define nv_gpu_depth_slot_reused(depth) ((void)0)
 #endif
 #if defined(_WIN32)
 #include <windows.h>
@@ -1665,7 +1667,8 @@ static void raster_indexed(uint32_t i0, uint32_t i1, uint32_t i2, uint32_t argb)
  * the title does reads it back, so a float buffer per zeta offset is enough. */
 #define NV_ZBUF_W 1024
 #define NV_ZBUF_H 1024
-static struct { uint32_t offset; float *z; } s_zbufs[4];
+static struct { uint32_t offset; float *z; uint64_t generation; } s_zbufs[4];
+static uint64_t s_depth_generation;
 static int s_ftrace;            /* frame trace: 0 idle, 2 tracing, 3 done */
 static int s_zbuf_next;
 
@@ -1692,6 +1695,8 @@ static float *zbuf_current(int create)
         s_zbufs[i].z = (float *)malloc(sizeof(float) * NV_ZBUF_W * NV_ZBUF_H);
     if (!s_zbufs[i].z)
         return NULL;
+    nv_gpu_depth_slot_reused(s_zbufs[i].z);
+    s_zbufs[i].generation = ++s_depth_generation;
     s_zbufs[i].offset = s_gpu.zeta_offset;
     for (k = 0; k < (size_t)NV_ZBUF_W * NV_ZBUF_H; k++)
         s_zbufs[i].z[k] = 3.4e38f;
@@ -2712,6 +2717,14 @@ static int gpu_begin_batch(void)
     /* Disabling depth tests does not change which depth surface is bound.
      * Keeping its identity avoids a readback on every HUD/opaque toggle. */
     d.depth = zbuf_current(1);
+    for (unsigned slot = 0; slot < 4; slot++)
+    {
+        if (s_zbufs[slot].z == d.depth)
+        {
+            d.depth_generation = s_zbufs[slot].generation;
+            break;
+        }
+    }
     d.depth_stride = NV_ZBUF_W;
     d.depth_test = s_gpu.depth_test; d.depth_write = s_gpu.depth_mask;
     d.depth_func = s_gpu.depth_func;
@@ -3810,7 +3823,10 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
             }
             if (!gpu_clear)
             {
-                nv_gpu_discard_overwritten(clear_color,s_gpu.pitch,
+                /* Vulkan either preserves unrelated recording or finishes the
+                 * required publication here. Suppress only the helpers' second
+                 * sync; both helpers still perform all original CPU writes. */
+                gpu_clear = nv_gpu_prepare_cpu_clear(clear_color,s_gpu.pitch,
                     ((s_gpu.format>>8)&15)==2?s_gpu.format:0,
                     s_gpu.clip_x,s_gpu.clip_y,s_gpu.clip_w,s_gpu.clip_h,
                     (param&1)?zbuf_current(0):NULL);
@@ -3910,7 +3926,7 @@ void nv2a_pb_exec_method(uint32_t subch, uint32_t method, uint32_t param)
         return;
 
     case NV097_FLIP_STALL:
-        nv_gpu_sync_reason("presentation");
+        nv_gpu_sync_color_reason("presentation");
 #if defined(_WIN32)
         if (getenv("RECOMP_PROFILE_GPU")) {
             static ULONGLONG last_frame;

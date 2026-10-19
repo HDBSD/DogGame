@@ -31,7 +31,13 @@ typedef struct {
     /* Optional non-linear guest surface layout; offsets are in bytes. */
     unsigned surface_format;
     NvGpuSurfaceOffset surface_offset;
+    /* Host depth-slot lifetime, not a guest address. Zero supports callers
+     * whose depth allocation is stable for the backend's whole lifetime. */
+    uint64_t depth_generation;
 } NvGpuDraw;
+/* Before reassigning a host depth slot, discard its previous GPU ownership.
+ * Title thread only; the caller then initializes the replacement CPU buffer. */
+void nv_gpu_depth_slot_reused(const float *depth);
 int nv_gpu_enabled(void);
 int nv_gpu_begin(const NvGpuDraw *);
 void nv_gpu_triangle(const NvGpuVertex *);
@@ -44,9 +50,16 @@ int nv_gpu_indexed_upload_enabled(void);
 void nv_gpu_end(void);
 void nv_gpu_sync(void);
 void nv_gpu_sync_reason(const char *reason);
+/* Publish color for CPU texture decoding/presentation without requesting a
+ * depth read. Vulkan retains authoritative depth until an explicit consumer. */
+void nv_gpu_sync_color_reason(const char *reason);
 void nv_gpu_sync_depth(const char *reason);
 void nv_gpu_prepare_depth_change(const uint8_t *next_color);
 void nv_gpu_discard_overwritten(const uint8_t *color, unsigned pitch, unsigned format, unsigned x, unsigned y, unsigned width, unsigned height, const float *depth);
+/* Prepare an immediate CPU clear. Returns 1 when the caller can omit its
+ * additional synchronization; does not omit the CPU writes themselves. */
+int nv_gpu_prepare_cpu_clear(const uint8_t *color, unsigned pitch, unsigned format,
+                             unsigned x, unsigned y, unsigned width, unsigned height, const float *depth);
 typedef struct
 {
     const uint8_t *color;

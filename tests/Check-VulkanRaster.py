@@ -286,6 +286,34 @@ int main()
     CHECK(!nv_vk_clear_attachments(&clear)); CHECK(color_dirty);
     nv_vk_sync();
     for (uint32_t &pixel : pixels) pixel = 0;
+    // CPU fallback clears must retain untouched color pixels, but need not
+    // publish depth that the executor immediately overwrites in its entirety.
+    c.clip_w = 64; c.depth_test = c.depth_write = 1;
+    CHECK(nv_vk_begin(&c)); quad(.05f, 0, 1, 0, 1);
+    uint64_t unrelated_waits = wait_ticks;
+    nv_vk_prepare_cpu_clear((uint8_t *)padded_pixels, 68*4, 0, 0, 0, 64, 64, padded_depth);
+    CHECK(recording && color_dirty && depth_dirty && wait_ticks == unrelated_waits);
+    for (uint32_t &pixel : padded_pixels) pixel = 0;
+    for (float &z : padded_depth) z = 1;
+    nv_vk_prepare_cpu_clear((uint8_t *)pixels, 256, 0, 0, 0, 32, 64, depths);
+    CHECK(pixels[8*64+56] == 0xFF00FF00);
+    for (unsigned y = 0; y < 64; y++)
+        for (unsigned x = 0; x < 32; x++) pixels[y*64+x] = 0xFF123456;
+    for (float &z : depths) z = 1;
+    CHECK(nv_vk_begin(&c)); quad(.8f, 0, 0, 1, 1); nv_vk_sync();
+    CHECK(pixels[8*64+56] == 0xFF0000FF && fabs(depths[0] - .8f) < .00001f);
+    // A full overwrite needs neither attachment published, yet still waits
+    // for the submission before invalidating resources and allowing CPU writes.
+    CHECK(nv_vk_begin(&c)); quad(.1f, 1, 0, 0, 1);
+    uint64_t overwritten_reads = readbacks;
+    nv_vk_prepare_cpu_clear((uint8_t *)pixels, 256, 0, 0, 0, 64, 64, depths);
+    CHECK(readbacks == overwritten_reads && !recording);
+    for (uint32_t &pixel : pixels) pixel = 0xFF123456;
+    for (float &z : depths) z = 1;
+    CHECK(nv_vk_begin(&c)); quad(.8f, 0, 1, 0, 1); nv_vk_sync();
+    CHECK(pixels[0] == 0xFF00FF00 && fabs(depths[0] - .8f) < .00001f);
+    c.depth_test = c.depth_write = 0;
+    for (uint32_t &pixel : pixels) pixel = 0;
     c.clip_w = 64;
     uint64_t waits_before = wait_ticks, reads_before = readbacks, early_before = early_submissions;
     uint64_t passes_before = render_passes;
@@ -389,12 +417,238 @@ int main()
     CHECK(high && high_width == 2560 && high_height == 1440);
     CHECK(high[60*2560+80] == large_color[20*640+20]);
     CHECK(high[0] == 0xFF00FF00);
+    selected_width = 3840; selected_height = 2160;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    CHECK(target_width == 3840 && target_height == 2160);
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high_width == 3840 && high_height == 2160);
+    // Clear a pooled main target while an intermediate target is bound.
+    NvGpuDraw intermediate = scaled;
+    intermediate.color = (uint8_t *)pixels; intermediate.depth = depths;
+    intermediate.width = intermediate.height = intermediate.clip_w = intermediate.clip_h = 64;
+    intermediate.clip_x = intermediate.clip_y = 0;
+    intermediate.pitch = 256; intermediate.depth_stride = 64;
+    CHECK(nv_vk_begin(&intermediate)); quad(.1f, 0, 1, 0, 1); nv_vk_sync();
+    NvGpuClear pooled_clear = {};
+    pooled_clear.color = (uint8_t *)large_color;
+    pooled_clear.pitch = 640*4;
+    pooled_clear.width = 640; pooled_clear.height = 480;
+    pooled_clear.color_value = 0xFF101010;
+    CHECK(nv_vk_clear_attachments(&pooled_clear));
+    std::fill(large_color, large_color + 640*480, pooled_clear.color_value);
+    nv_vk_sync();
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[0] == pooled_clear.color_value && high[3840*2160-1] == pooled_clear.color_value);
+    uint64_t uploads_before = color_upload_bytes + depth_upload_bytes;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    CHECK(color_upload_bytes + depth_upload_bytes == uploads_before);
+    uint64_t resolves_before = native_resolves;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end();
+    nv_vk_sync_reason("test native consumer");
+    CHECK(!native_resolve_supported || native_resolves == resolves_before + 1);
+    CHECK(depth_read_width == 3840 && depth_read_height == 480);
+    CHECK(color_read_width == (native_resolve_supported ? 640u : 3840u));
+    CHECK(large_color[0] == 0xFF101010);
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high_width == 3840 && high_height == 2160);
+    bool saved_resolve_support = native_resolve_supported;
+    native_resolve_supported = false;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end();
+    nv_vk_sync_reason("test native fallback");
+    CHECK(color_read_width == 3840 && large_color[0] == 0xFF101010);
+    native_resolve_supported = saved_resolve_support;
+    scaled.clip_x = 0; scaled.clip_w = 640;
+    for (NvGpuVertex &v : tiny)
+    {
+        v.pos[2] = .1f; v.color[0] = 1; v.color[2] = 0;
+    }
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[90*3840+120] == 0xFFFF0000);
+    CHECK(high[93*3840+123] == 0xFF101010);
+    CHECK(large_color[20*640+20] == 0xFF101010);
+    // Changed native data uploads at native size, then expands on the GPU.
+    // Existing physical snapshots cannot hide either of these CPU edits.
+    large_color[0] = 0xFF00FF00;
+    large_depth[0] = .125f;
+    uint64_t color_bytes_before = color_upload_bytes, depth_bytes_before = depth_upload_bytes;
+    uint64_t expansions_before = native_upload_expansions;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    uint64_t expected_upload = native_resolve_supported ? 640*480*4 : 3840*2160*4;
+    CHECK(color_upload_bytes - color_bytes_before == expected_upload);
+    CHECK(depth_upload_bytes - depth_bytes_before == expected_upload);
+    CHECK(!native_resolve_supported || native_upload_expansions == expansions_before + 2);
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[0] == 0xFF00FF00 && large_depth[0] == .125f);
+    // Devices without the blit features retain the conservative full upload.
+    saved_resolve_support = native_resolve_supported;
+    native_resolve_supported = false;
+    large_color[0] = 0xFF0000FF;
+    large_depth[0] = .25f;
+    color_bytes_before = color_upload_bytes; depth_bytes_before = depth_upload_bytes;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    CHECK(color_upload_bytes - color_bytes_before == 3840*2160*4);
+    CHECK(depth_upload_bytes - depth_bytes_before == 3840*2160*4);
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[0] == 0xFF0000FF && large_depth[0] == .25f);
+    native_resolve_supported = saved_resolve_support;
+    // Evict the main target while retaining its validated depth history.
+    // Reload must restore subpixel depth GPU-to-GPU, without a host upload.
+    static uint32_t evict_colors[8][64*64];
+    for (unsigned i = 0; i < 8; i++)
+    {
+        intermediate.color = (uint8_t *)evict_colors[i];
+        intermediate.depth = nullptr;
+        CHECK(nv_vk_begin(&intermediate)); quad(.1f, 0, 1, 0, 1); nv_vk_sync();
+    }
+    depth_bytes_before = depth_upload_bytes;
+    uint64_t gpu_history_before = gpu_depth_history_bytes;
+    for (NvGpuVertex &v : tiny)
+    {
+        v.pos[2] = .2f; v.color[0] = 0; v.color[2] = 1;
+    }
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    CHECK(depth_upload_bytes == depth_bytes_before);
+    CHECK(gpu_depth_history_bytes == gpu_history_before + 3840ull*2160*4);
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[90*3840+120] == 0xFFFF0000);
+    // The row-packed depth range must also work through the uncached-memory
+    // bulk-copy fallback, without treating it as a full physical attachment.
+    saved_flags = readback_memory_flags;
+    readback_memory_flags &= ~VK_MEMORY_PROPERTY_HOST_CACHED_BIT;
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[90*3840+120] == 0xFFFF0000);
+    CHECK(large_depth[0] == .25f);
+    readback_memory_flags = saved_flags;
+    NvGpuDraw no_depth_test = scaled;
+    no_depth_test.depth_test = 0;
+    no_depth_test.depth_write = 1;
+    for (NvGpuVertex &v : tiny)
+    {
+        v.pos[2] = .9f; v.color[0] = v.color[2] = 0; v.color[1] = 1;
+    }
+    CHECK(nv_vk_begin(&no_depth_test)); nv_vk_triangle(tiny); nv_vk_end();
+    CHECK(depth_dirty);
+    nv_vk_sync();
+    // The maintained write-only pipeline uses ALWAYS when the guest test is
+    // disabled but its write mask is set. Its .9 write must admit .2 blue.
+    for (NvGpuVertex &v : tiny)
+    {
+        v.pos[2] = .2f; v.color[1] = 0; v.color[2] = 1;
+    }
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[90*3840+120] == 0xFF0000FF);
+    // Rebinding another depth allocation to the same color surface must carry
+    // forward physical subpixel color, even when native samples cannot see it.
+    static float alternate_large_depth[640*480];
+    std::fill(alternate_large_depth, alternate_large_depth + 640*480, 1.f);
+    NvGpuDraw alternate_scaled = scaled;
+    alternate_scaled.depth = alternate_large_depth;
+    for (NvGpuVertex &v : tiny)
+    {
+        v.pos[0] += 2; v.pos[2] = .1f;
+        v.color[0] = v.color[2] = 0; v.color[1] = 1;
+    }
+    CHECK(nv_vk_begin(&alternate_scaled)); nv_vk_triangle(tiny); nv_vk_end();
+    nv_vk_sync_color_reason("presentation");
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[90*3840+120] == 0xFF0000FF && high[90*3840+132] == 0xFF00FF00);
+    for (NvGpuVertex &v : tiny)
+    {
+        v.pos[0] += 2; v.color[0] = 1; v.color[1] = 0;
+    }
+    CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
+    high = nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height);
+    CHECK(high && high[90*3840+120] == 0xFF0000FF && high[90*3840+132] == 0xFF00FF00);
     internal_scaling = false;
     CHECK(nv_vk_begin(&scaled)); nv_vk_triangle(tiny); nv_vk_end(); nv_vk_sync();
     CHECK(target_width == 640 && target_height == 480);
     CHECK(!nv_vk_present_image((uint8_t *)large_color, 640*4, &high_width, &high_height));
     nv_vk_report(); nv_vk_shutdown(); nv_vk_shutdown();
-    CHECK(nv_vk_initialize(error, sizeof error)); nv_vk_shutdown();
+    CHECK(nv_vk_initialize(error, sizeof error));
+    // GPU-only depth ownership: two color targets sharing one depth allocation
+    // must see the newest physical depth without publishing it through RAM.
+    static uint32_t owned_color[3][64*64];
+    static float owned_depth[64*64], other_depth[64*64];
+    std::fill(owned_depth, owned_depth + 64*64, 1.f);
+    std::fill(other_depth, other_depth + 64*64, 1.f);
+    NvGpuDraw owned = {};
+    owned.color = (uint8_t *)owned_color[0]; owned.depth = owned_depth;
+    owned.width = owned.height = owned.clip_w = owned.clip_h = 64;
+    owned.pitch = 256; owned.depth_stride = 64; owned.zscale = 1;
+    owned.depth_test = owned.depth_write = 1; owned.depth_func = 0x201;
+    owned.mask = 0x01010101; owned.mode = 2; owned.depth_generation = 1;
+    CHECK(nv_vk_begin(&owned)); quad(.2f, 1, 0, 0, 1);
+    nv_vk_sync_color_reason("presentation");
+    CHECK(owned_depth[0] == 1.f && depth_dirty && !recording);
+    owned.color = (uint8_t *)owned_color[1];
+    CHECK(nv_vk_begin(&owned)); quad(.8f, 0, 1, 0, 1);
+    nv_vk_sync_color_reason("presentation");
+    CHECK(owned_color[1][0] == 0 && owned_depth[0] == 1.f);
+    CHECK(deferred_depth_copies > 0);
+    // A real software consumer materializes the latest version, including
+    // cached depth when another unrelated target is currently active.
+    owned.color = (uint8_t *)owned_color[2]; owned.depth = other_depth;
+    CHECK(nv_vk_begin(&owned)); quad(.6f, 0, 0, 1, 1);
+    nv_vk_sync();
+    CHECK(fabs(owned_depth[0] - .2f) < .00001f);
+    CHECK(fabs(other_depth[0] - .6f) < .00001f);
+    // Reassign a host slot while its old GPU depth is pending. Publication
+    // must never write the previous allocation into the replacement buffer.
+    owned.color = (uint8_t *)owned_color[0]; owned.depth = owned_depth;
+    CHECK(nv_vk_begin(&owned)); quad(.1f, 1, 0, 0, 1);
+    CHECK(recording);
+    nv_vk_depth_slot_reused(owned_depth);
+    std::fill(owned_depth, owned_depth + 64*64, 1.f);
+    owned.depth_generation = 2;
+    CHECK(nv_vk_begin(&owned)); quad(.8f, 0, 1, 0, 1); nv_vk_sync();
+    CHECK(owned_color[0][0] == 0xFF00FF00 && fabs(owned_depth[0] - .8f) < .00001f);
+    CHECK(nv_vk_begin(&owned)); quad(.1f, 1, 0, 0, 1);
+    std::fill(owned_depth, owned_depth + 64*64, 1.f);
+    nv_vk_sync_color_reason("presentation");
+    // A color-only publication must not relabel CPU-edited depth as matching
+    // an older GPU image. The next batch must consume the new CPU values.
+    CHECK(nv_vk_begin(&owned)); quad(.5f, 0, 1, 0, 1); nv_vk_sync();
+    CHECK(owned_color[0][0] == 0xFF00FF00 && fabs(owned_depth[0] - .5f) < .00001f);
+    // A full depth clear supersedes every cached version, even if its CPU
+    // value equals an earlier snapshot. The old .1 GPU image cannot return.
+    CHECK(nv_vk_begin(&owned)); quad(.1f, 1, 0, 0, 1);
+    NvGpuClear owned_clear = {};
+    owned_clear.depth = owned_depth; owned_clear.depth_value = .8f;
+    CHECK(nv_vk_clear_attachments(&owned_clear));
+    std::fill(owned_depth, owned_depth + 64*64, .8f);
+    owned.color = (uint8_t *)owned_color[1];
+    CHECK(nv_vk_begin(&owned)); quad(.5f, 0, 0, 1, 1); nv_vk_sync();
+    CHECK(owned_color[1][0] == 0xFF0000FF && fabs(owned_depth[0] - .5f) < .00001f);
+    // Different native dimensions require explicit materialization before
+    // interpreting the allocation with a different depth layout.
+    CHECK(nv_vk_begin(&owned)); quad(.2f, 1, 0, 0, 1);
+    nv_vk_sync_color_reason("presentation");
+    owned.color = (uint8_t *)owned_color[2];
+    owned.width = owned.height = owned.clip_w = owned.clip_h = 32;
+    CHECK(nv_vk_begin(&owned)); quad(.7f, 0, 1, 0, 1); nv_vk_sync();
+    CHECK(fabs(owned_depth[0] - .2f) < .00001f);
+    // More outstanding allocations than the bounded pool must materialize
+    // depth before eviction, without destroying in-flight image resources.
+    static uint32_t eviction_color[10][64*64];
+    static float eviction_depth[10][64*64];
+    owned.width = owned.height = owned.clip_w = owned.clip_h = 64;
+    for (unsigned allocation = 0; allocation < 10; allocation++)
+    {
+        std::fill(eviction_depth[allocation], eviction_depth[allocation] + 64*64, 1.f);
+        owned.color = (uint8_t *)eviction_color[allocation]; owned.depth = eviction_depth[allocation];
+        owned.depth_generation = allocation + 10;
+        CHECK(nv_vk_begin(&owned)); quad(.3f, 1, 0, 0, 1);
+        nv_vk_sync_color_reason("presentation");
+    }
+    nv_vk_sync();
+    for (unsigned allocation = 0; allocation < 10; allocation++)
+    {
+        CHECK(fabs(eviction_depth[allocation][0] - .3f) < .00001f);
+    }
+    nv_vk_shutdown();
     puts("Passed: Vulkan color/depth, indexed geometry, blend, alpha, textures, filtering, multistage combiners, scissor, publication, CPU edits, swizzled surfaces, target switches, fallback and lifecycle.");
 }
 '''
