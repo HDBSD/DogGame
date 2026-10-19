@@ -138,6 +138,17 @@ static void native_menu_frame(uint32_t scene, uint32_t mode)
     click_mode = s_click_mode;
     s_click_pending = 0;
     ReleaseSRWLockExclusive(&s_hit_lock);
+    if (pending == 1)
+    {
+        /* A queued hover predates this title frame. Let a fresh keyboard or
+         * controller edge win instead of restoring the mouse's old focus.
+         * Clicks remain explicit activation requests. Guest reads stay here. */
+        TitleMenuInputSnapshot input;
+        if (title_menu_input_snapshot(&input) && input.pressed)
+        {
+            pending = 0;
+        }
+    }
     if (pending && scene == click_scene && mode == click_mode && !s_open && !xbox_DebugOverlayCaptured())
     {
         unsigned i;

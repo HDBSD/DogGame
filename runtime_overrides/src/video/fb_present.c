@@ -916,9 +916,29 @@ int xbox_FramebufferKeyDown(int vk)
     return s_key_down[vk] != 0;
 }
 
+static POINT s_menu_mouse_position;
+static int s_menu_mouse_position_valid;
+
+/* Windows also sends WM_MOUSEMOVE after visibility/layout/cursor changes.
+ * Only a changed screen position is mouse navigation. Comparing client
+ * coordinates would mistake a resized or moved window for player input.
+ * State belongs exclusively to the window thread. Clicks remain independent. */
+static int menu_mouse_position_changed(POINT position)
+{
+    int changed = s_menu_mouse_position_valid &&
+        (position.x != s_menu_mouse_position.x || position.y != s_menu_mouse_position.y);
+    s_menu_mouse_position = position;
+    s_menu_mouse_position_valid = 1;
+    return changed;
+}
+
 static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
     switch (m) {
+    case WM_CREATE:
+    case WM_SETFOCUS:
+        s_menu_mouse_position_valid = GetCursorPos(&s_menu_mouse_position) != 0;
+        break;
     case WM_SETCURSOR:
         cursor_update(h);
         if (s_cursor_locked && LOWORD(l) == HTCLIENT) {
@@ -941,6 +961,14 @@ static LRESULT CALLBACK fb_wndproc(HWND h, UINT m, WPARAM w, LPARAM l)
         break;
     case WM_MOUSEMOVE:
     case WM_LBUTTONDOWN:
+        if (m == WM_MOUSEMOVE)
+        {
+            POINT position;
+            if (!GetCursorPos(&position) || !menu_mouse_position_changed(position))
+            {
+                return 0;
+            }
+        }
         if(!s_mouse_interaction) return 0;
         {
             RECT view=display_view(h);
