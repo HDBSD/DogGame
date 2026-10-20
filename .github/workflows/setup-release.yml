@@ -1,0 +1,111 @@
+name: Release setup tool
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - 'setup/**'
+      - 'Resources/DogGame.ico'
+      - '.github/workflows/setup-release.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    # Manual runs on development branches must not publish stable setup releases.
+    if: github.ref == 'refs/heads/master'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install publishing SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Cache verified toolchain downloads
+        uses: actions/cache@v4
+        with:
+          path: build/portable/downloads
+          key: setup-tools-${{ runner.os }}-${{ hashFiles('setup/toolchain.lock.json', 'setup/Prepare-Toolchain.ps1') }}
+
+      - name: Build self-contained setup with embedded tools
+        run: ./setup/Publish.ps1
+
+      - name: Validate embedded tools and setup behavior
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $executable = Join-Path $PWD 'build/setup/publish/DogGameSetup.exe'
+          foreach ($check in @('toolchain-test', 'self-test'))
+          {
+              $process = Start-Process -FilePath $executable -ArgumentList "--$check" -PassThru -WindowStyle Hidden
+              if (-not $process.WaitForExit(600000))
+              {
+                  Stop-Process -Id $process.Id -Force
+                  throw "$check timed out."
+              }
+              $process.Refresh()
+              $result = Join-Path $PWD "build/setup/publish/$check-result.txt"
+              if (Test-Path -LiteralPath $result)
+              {
+                  Get-Content -LiteralPath $result
+              }
+              if ($process.ExitCode -ne 0 -or -not (Test-Path -LiteralPath $result))
+              {
+                  throw "$check failed (exit $($process.ExitCode))."
+              }
+          }
+
+      - name: Package release
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $directory = New-Item -ItemType Directory -Path 'build/setup/release' -Force
+          $archive = Join-Path $directory.FullName 'DogGameSetup-win-x64.zip'
+          Compress-Archive -LiteralPath 'build/setup/publish/DogGameSetup.exe' -DestinationPath $archive
+          $digest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$digest  DogGameSetup-win-x64.zip" | Set-Content -LiteralPath "$archive.sha256" -Encoding ascii
+
+      - name: Upload check results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: setup-check-results
+          path: build/setup/publish/*-result.txt
+          if-no-files-found: ignore
+
+      - name: Publish GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_COMMIT: ${{ github.sha }}
+          RELEASE_TAG: setup-${{ github.run_number }}-${{ github.run_attempt }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $notes = @"
+          Windows x64 setup tool with the portable build tools embedded.
+
+          Extract DogGameSetup.exe into its own folder and run it. Setup downloads the project source and builds the game on your device; your supported Xbox game files are required. No game executable or game assets are included.
+
+          Source commit: $env:RELEASE_COMMIT
+          "@
+          $notesPath = Join-Path $PWD 'build/setup/release/notes.md'
+          $notes | Set-Content -LiteralPath $notesPath -Encoding utf8
+          gh release create $env:RELEASE_TAG `
+              'build/setup/release/DogGameSetup-win-x64.zip' `
+              'build/setup/release/DogGameSetup-win-x64.zip.sha256' `
+              --target $env:RELEASE_COMMIT --title "DogGame Setup $env:RELEASE_TAG" --notes-file $notesPath
+          if ($LASTEXITCODE -ne 0)
+          {
+              throw "Publishing the setup release failed (exit $LASTEXITCODE)."
+          }

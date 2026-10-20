@@ -38,6 +38,18 @@ Portable Git uses configured credentials, disables hidden interactive prompts, a
 
 ## Publishing
 
+The [setup release workflow](../.github/workflows/setup-release.yml) publishes a
+GitHub release whenever `setup/`, the setup icon, or the workflow changes on
+`master`. It also supports a manual run from the Actions page on `master`.
+The Windows runner builds the self-contained setup, verifies its embedded
+toolchain and runs the setup self-tests before publishing
+`DogGameSetup-win-x64.zip` and its SHA-256 checksum. Only the setup executable
+is packaged; game source, game executables and assets are excluded. Each run
+uses a unique `setup-<run number>-<attempt>` tag targeting the tested commit.
+Tool downloads are cached, and their pinned checksums are still verified on
+every build. Publishing uses the repository's Actions token with release write
+permission; no personal access token is needed.
+
 Run `setup/Publish.ps1` with the .NET 10 SDK on the publishing machine. Prepare-Toolchain.ps1 downloads exact packages from `toolchain.lock.json`, rejects checksum mismatches, retains their packaged license files and adds Ninja's license, and creates a compressed tools archive. The archive and checksum are embedded in `build/setup/publish/DogGameSetup.exe`; game source/assets/generated code are excluded. Downloads are cached under `build/portable/downloads`.
 
 Python's archive hash is pinned from the official HTTPS download; GitHub release asset hashes and the Capstone PyPI digest were also checked when selecting the packages. Update versions/hashes deliberately and repeat build validation. Full distributions are bundled initially, so setup is considerably larger than its UI alone.
