@@ -101,10 +101,19 @@ internal sealed class BootstrapRunner
                 RequireMarker(installation, InstallationMarker);
             }
         }
-        foreach (var process in Process.GetProcessesByName("DogGame"))
+        EnsureGameStopped(installation);
+    }
+
+    private static void EnsureGameStopped(string installation)
+    {
+        foreach (var process in Process.GetProcesses())
         {
             using (process)
             {
+                if (!process.ProcessName.StartsWith("DogGame", StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
                 if (process.MainModule?.FileName is string executable && PathsOverlap(executable, installation))
                 {
                     throw new InvalidOperationException("Close DogGame before updating its installation.");
@@ -216,6 +225,8 @@ internal sealed class BootstrapRunner
 
     internal static void Install(string release, string installation, CancellationToken token)
     {
+        // A game launched during the build must not be updated underneath it.
+        EnsureGameStopped(installation);
         string parent = Path.GetDirectoryName(installation) ?? throw new InvalidOperationException("Choose an installation subfolder.");
         Directory.CreateDirectory(parent);
         string staging = Path.Combine(parent, ".doggame-install-" + Guid.NewGuid().ToString("N"));
@@ -240,7 +251,19 @@ internal sealed class BootstrapRunner
             // Commit has no cancellation points: either publish the new build or restore the old directory.
             if (Directory.Exists(installation))
             {
-                Directory.Move(installation, backup);
+                try
+                {
+                    Directory.Move(installation, backup);
+                }
+                catch (IOException error) when (IsSharingViolation(error))
+                {
+                    // A terminal or editor can hold the directory without locking
+                    // any game files. Preserve that directory and commit files
+                    // individually, retaining originals for rollback.
+                    InstallIntoOpenDirectory(staging, installation, backup);
+                    committed = true;
+                    return;
+                }
             }
             try
             {
@@ -270,6 +293,60 @@ internal sealed class BootstrapRunner
                 ClearReadOnlyFiles(backup);
                 Directory.Delete(backup, recursive: true);
             }
+        }
+    }
+
+    private static bool IsSharingViolation(IOException error)
+    {
+        int code = error.HResult & 0xFFFF;
+        return code is 32 or 33;
+    }
+
+    private static void InstallIntoOpenDirectory(string staging, string installation, string backup)
+    {
+        RejectLinks(installation);
+        var replaced = new List<(string Destination, string? Original)>();
+        try
+        {
+            foreach (string source in Directory.EnumerateFiles(staging, "*", SearchOption.AllDirectories).Order(StringComparer.Ordinal))
+            {
+                string relative = Path.GetRelativePath(staging, source);
+                string destination = Path.Combine(installation, relative);
+                string? original = null;
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                if (File.Exists(destination))
+                {
+                    original = Path.Combine(backup, relative);
+                    Directory.CreateDirectory(Path.GetDirectoryName(original)!);
+                    File.Move(destination, original);
+                }
+                replaced.Add((destination, original));
+                File.Move(source, destination);
+            }
+        }
+        catch (Exception installationError)
+        {
+            try
+            {
+                foreach (var file in replaced.AsEnumerable().Reverse())
+                {
+                    if (File.Exists(file.Destination))
+                    {
+                        File.SetAttributes(file.Destination, File.GetAttributes(file.Destination) & ~FileAttributes.ReadOnly);
+                        File.Delete(file.Destination);
+                    }
+                    if (file.Original != null)
+                    {
+                        File.Move(file.Original, file.Destination);
+                    }
+                }
+            }
+            catch (Exception rollbackError)
+            {
+                throw new AggregateException($"Installation failed and could not fully restore the previous files. Backups remain in {backup}.",
+                    installationError, rollbackError);
+            }
+            throw new IOException($"Could not install into {installation}. Close the game or application locking its files, then retry. The completed build is retained. {installationError.Message}", installationError);
         }
     }
 

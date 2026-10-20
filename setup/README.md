@@ -11,6 +11,13 @@ convention; arbitrary delegate names make the manual scanner omit their bodies.
 CMake also supports older generated trees by locating the original definitions
 by address instead of assuming fixed chunk filenames.
 
+If an editor or terminal holds `DogGame-Contents` open against directory
+renames, installation keeps that directory and replaces staged files with
+per-file backups. A locked destination file aborts this fallback and restores
+earlier replacements. Existing settings and unrelated files remain in place.
+The self-test reproduces both the directory lock and file-lock rollback.
+Running DogGame variants are checked again immediately before installation.
+
 - **Build** selects the extracted Xbox game folder containing the supported `default.xbe`. The built game is installed into `DogGame-Contents` beside `DogGameSetup.exe`. There is no installation-folder picker.
 - **Update** downloads fresh source using the saved Xbox game folder and updates the adjacent `DogGame-Contents` installation.
 - **Play** launches `DogGame-Contents/DogGame.exe` with that folder as its working directory, so game assets resolve correctly. It is enabled when the executable exists, independently of build-tool availability.

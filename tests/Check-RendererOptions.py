@@ -16,23 +16,27 @@ int main(void)
 {
     char error[512];
     const wchar_t *ordinary[] = {L"DogGame.exe"};
+    const wchar_t *directx[] = {L"DogGame.exe", L"--dx11"};
+    const wchar_t *last[] = {L"DogGame.exe", L"--vulkan", L"--dx11"};
     const wchar_t *alone[] = {L"DogGame.exe", L"--vulkan"};
     const wchar_t *debug[] = {L"DogGame.exe", L"--debug"};
     const wchar_t *selected[] = {L"DogGame.exe", L"--debug", L"--vulkan"};
     const wchar_t *reversed[] = {L"DogGame.exe", L"--vulkan", L"--debug"};
     const wchar_t *invalid[] = {L"DogGame.exe", L"--debug", L"--vulkan", L"--unknown"};
     CHECK(title_options_parse(1, ordinary, error, sizeof error));
-    CHECK(!title_options.vulkan && !title_options.debug);
-    CHECK(!title_options_parse(2, alone, error, sizeof error));
-    CHECK(!title_options.vulkan && !title_options.debug);
-    CHECK(title_options_parse(2, debug, error, sizeof error)); CHECK(!title_options.vulkan);
+    CHECK(title_options.vulkan && !title_options.debug);
+    CHECK(title_options_parse(2, alone, error, sizeof error));
+    CHECK(title_options.vulkan && !title_options.debug);
+    CHECK(title_options_parse(2, debug, error, sizeof error)); CHECK(title_options.vulkan);
     CHECK(title_options_parse(3, selected, error, sizeof error));
     CHECK(title_options.vulkan && title_options.debug);
     CHECK(title_options_parse(3, reversed, error, sizeof error)); CHECK(title_options.vulkan);
     CHECK(!title_options_parse(4, invalid, error, sizeof error));
     CHECK(title_options.vulkan && title_options.debug); // failed parse publishes no partial options
-    CHECK(title_options_parse(1, ordinary, error, sizeof error)); CHECK(!title_options.vulkan);
-    puts("Passed: Vulkan requires explicit --debug --vulkan, either order; default/debug-only unchanged; invalid arguments publish no partial options.");
+    CHECK(title_options_parse(1, ordinary, error, sizeof error)); CHECK(title_options.vulkan && !title_options.debug && !title_options.fps_graph);
+    CHECK(title_options_parse(2, directx, error, sizeof error)); CHECK(!title_options.vulkan && title_options.renderer_override && !title_options.debug);
+    CHECK(title_options_parse(3, last, error, sizeof error)); CHECK(!title_options.vulkan && title_options.renderer_override);
+    puts("Passed: Vulkan defaults without debug, explicit renderer overrides and invalid-argument publication checks.");
 }
 '''
 video = (root / "runtime_overrides/src/video/fb_present.c").read_text()

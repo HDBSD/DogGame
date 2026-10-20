@@ -1,17 +1,23 @@
-# Experimental Vulkan renderer
+# Vulkan renderer
 
 Launch from the installed game's directory:
 
 ```powershell
-.\DogGame.exe --debug --vulkan
+.\DogGame.exe
+# Override the saved renderer for one launch:
+.\DogGame.exe --dx11
 # Optional direct gameplay probe:
 .\DogGame.exe --debug --vulkan --level H001
 ```
 
-`--vulkan` requires `--debug`, in either argument order. Ordinary launches and
-debug launches without this flag retain the existing D3D11 backend. No saved
-setting or environment variable selects Vulkan. Preview authentication still
-applies when the executable was built with preview locking.
+Vulkan is the default for ordinary launches. Recomp Settings includes a
+Renderer row which confirms and saves a change for the next launch. Restart
+after saving progress to apply it; live backend resources are not migrated.
+The preference is `[Display] Renderer=Vulkan` or `Renderer=DirectX11` in
+`display.ini` beside the executable. Missing or invalid values select Vulkan.
+`--vulkan` and `--dx11` override that preference for one launch without requiring
+`--debug` or overwriting the saved choice; the last renderer argument wins.
+Preview authentication applies only when built with preview locking.
 
 The graphics driver must provide Vulkan. Users need no Vulkan SDK or shader
 compiler. Missing loader/device support produces a startup error rather than

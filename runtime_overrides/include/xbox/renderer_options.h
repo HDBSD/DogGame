@@ -7,7 +7,7 @@ extern "C"
 #endif
 
     /* Startup/title thread only, before any draws. Selection is process-lifetime.
-     * Explicit debug opt-in only: no environment variable selects Vulkan.
+     * The title selects its saved preference or command-line override here.
      * Returns zero with an error on unavailable loader/device; never silently
      * substitutes D3D11 for an explicitly requested Vulkan backend. */
     int xbox_SelectExperimentalVulkan(char *error, unsigned capacity);

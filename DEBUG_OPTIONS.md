@@ -30,7 +30,8 @@ Run `DogGame.exe` from `SD100F/build/Release`, where its `game` and `saves` fold
 | `--level <ID>` | Start directly in a level using its four-character scene ID, such as `H001` or `W020`. Requires `--debug`. IDs are case insensitive and must have installed HIP data. Direct H001 startup also skips its opening `cin1` movie. |
 | `--loadsaveslot <1-3>` | Restore a save and enter its saved level. Requires `--debug`. Combined with `--level`, restore saved progress first, then enter the requested level. An unavailable save falls back to the menu and records an error in the debug log. |
 | `--trace` | Request one frame trace at startup. Requires `--debug`. |
-| `--vulkan` | Select the experimental Vulkan renderer. Requires `--debug`; ordinary launches retain D3D11. See [VULKAN_RENDERER.md](VULKAN_RENDERER.md) for limits. |
+| `--vulkan` | Use Vulkan for this launch, overriding the saved preference. Vulkan is the default; debug mode is not required. See [VULKAN_RENDERER.md](VULKAN_RENDERER.md). |
+| `--dx11` | Use DirectX 11 for this launch, overriding the saved preference. Debug mode is not required. |
 | `--profiler` | Start a ten-second renderer timing capture. Requires `--debug`. |
 | `--fpsgraph` | Start with the FPS/frame-time graph visible. Requires `--debug`. |
 | `--help` | Show argument help. |

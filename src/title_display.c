@@ -3,6 +3,8 @@
 #include "title_display.h"
 #include "api/title_guest_menu.h"
 #include "api/title_guest_ui.h"
+#include "api/title_renderer_settings.h"
+#include <xbox/renderer_options.h>
 #include <windows.h>
 #include <xbox/host_gamepad.h>
 #include <xbox/display_options.h>
@@ -209,9 +211,29 @@ static void native_menu_frame(uint32_t scene, uint32_t mode)
 
 static volatile LONG s_options;
 static unsigned s_selection;
+static int s_renderer_confirmation, s_renderer_pending_vulkan;
+
+/* Host window-thread confirmation: controller, keyboard and mouse use the
+ * same path. Saving affects the next launch, never live renderer resources. */
+static int renderer_confirmation_key(unsigned key)
+{
+    if (!s_renderer_confirmation)
+    {
+        return 0;
+    }
+    if (key == VK_ESCAPE || key == 'L' || key == 'X')
+    {
+        s_renderer_confirmation = 0;
+    }
+    else if (key == VK_RETURN || key == VK_SPACE || key == 'Z')
+    {
+        s_renderer_confirmation = title_renderer_settings_save(s_renderer_pending_vulkan) ? 0 : 2;
+    }
+    return 1;
+}
 enum
 {
-    RECOMP_SETTINGS_ROWS = 6
+    RECOMP_SETTINGS_ROWS = 7
 };
 /* Keep short taps across slow frames; this cursor never consumes guest input. */
 static HostGamepadMenuReader s_menu_input;
@@ -239,6 +261,10 @@ static int display_key(unsigned key)
     }
     if (s_recomp && s_open == 2)
     {
+        if (renderer_confirmation_key(key))
+        {
+            return 1;
+        }
         if (key == VK_ESCAPE || key == 'L' || key == 'X')
         {
             InterlockedExchange(&s_recomp_back, 1);
@@ -274,6 +300,13 @@ static int display_key(unsigned key)
             {
                 xbox_DisplayPauseOnFocusLossSet(!xbox_DisplayPauseOnFocusLoss());
             }
+            else if (s_selection == 5)
+            {
+                /* Backend resources cannot migrate mid-session. Confirm and
+                 * persist a next-launch choice without restarting gameplay. */
+                s_renderer_pending_vulkan = !title_renderer_settings_prefer_vulkan();
+                s_renderer_confirmation = 1;
+            }
             else
             {
                 InterlockedExchange(&s_recomp_back, 1);
@@ -298,6 +331,7 @@ static int display_key(unsigned key)
         if (s_recomp)
         {
             s_open = 2;
+            s_renderer_confirmation = 0;
             s_selection = 0;
         }
         else
@@ -344,6 +378,21 @@ static int display_key(unsigned key)
 
 static int display_click(int x, int y)
 {
+    if (s_renderer_confirmation && s_open == 2)
+    {
+        if (y >= 260 && y < 300)
+        {
+            if (x >= 150 && x < 320)
+            {
+                renderer_confirmation_key(VK_RETURN);
+            }
+            else if (x >= 360 && x < 580)
+            {
+                renderer_confirmation_key(VK_ESCAPE);
+            }
+        }
+        return 1;
+    }
     if (!s_options)
     {
         return native_click(x, y);
@@ -386,6 +435,10 @@ static int display_click(int x, int y)
 
 static void display_hover(int x, int y)
 {
+    if (s_renderer_confirmation && s_open == 2)
+    {
+        return;
+    }
     if (s_open)
     {
         if (s_open == 2)
@@ -510,16 +563,38 @@ static void display_draw(void *device, unsigned width, unsigned height)
     {
         SetTextColor(dc, RGB(0, 190, 0));
         label(dc, 150, 65, "RECOMP SETTINGS");
+        char renderer[96];
+        int active_vulkan = xbox_ExperimentalVulkanSelected();
+        int preferred_vulkan = title_renderer_settings_prefer_vulkan();
+        snprintf(renderer, sizeof renderer, "Renderer: %s%s", active_vulkan ? "Vulkan" : "DirectX 11",
+                 active_vulkan == preferred_vulkan ? "" : preferred_vulkan ? " -> Vulkan (restart)" : " -> DirectX 11 (restart)");
         const char *rows[] = {
             "Resolution", xbox_DisplayMouseInteraction() ? "Mouse interaction: ON" : "Mouse interaction: OFF",
             xbox_DisplayDynamicPrompts() ? "Dynamic button prompts: ON" : "Dynamic button prompts: OFF",
             xbox_DisplayFpsCap() ? "30 FPS cap: ON" : "30 FPS cap: OFF",
             xbox_DisplayPauseOnFocusLoss() ? "Pause on focus loss: ON" : "Pause on focus loss: OFF",
+            renderer,
             "Back  [Esc / B]"};
         for (unsigned i = 0; i < RECOMP_SETTINGS_ROWS; i++)
         {
             SetTextColor(dc, i == s_selection ? RGB(40, 255, 0) : RGB(0, 160, 0));
             label(dc, 150, 110 + i * 40, rows[i]);
+        }
+        if (s_renderer_confirmation)
+        {
+            RECT prompt = {115, 155, 620, 320};
+            FillRect(dc, &prompt, (HBRUSH)GetStockObject(BLACK_BRUSH));
+            FrameRect(dc, &prompt, (HBRUSH)GetStockObject(WHITE_BRUSH));
+            SetTextColor(dc, RGB(40, 255, 0));
+            snprintf(value, sizeof value, "Use %s on next launch?", s_renderer_pending_vulkan ? "Vulkan" : "DirectX 11");
+            label(dc, 135, 175, value);
+            label(dc, 135, 205, "Save progress, then restart to apply.");
+            if (s_renderer_confirmation == 2)
+            {
+                label(dc, 135, 235, "Could not save display.ini. Try again.");
+            }
+            label(dc, 150, 270, "Yes [A / Enter]");
+            label(dc, 360, 270, "Cancel [B / Esc]");
         }
         if (font)
         {
@@ -784,6 +859,7 @@ void title_display_frame(void)
     if (s_recomp && main_visible && !s_open)
     {
         s_open = 2;
+        s_renderer_confirmation = 0;
         s_selection = 0;
         xbox_MenuOverlayCapture(1);
     }

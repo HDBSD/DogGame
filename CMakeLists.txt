@@ -93,6 +93,7 @@ endforeach()
 
 # Core game sources
 set(GAME_SOURCES
+    src/api/title_renderer_settings.c
     src/api/title_guest_movie_frame.c
     src/overrides/movie_frame.c
     src/main.c

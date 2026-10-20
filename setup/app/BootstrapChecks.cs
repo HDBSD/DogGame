@@ -1,7 +1,14 @@
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+
 namespace DogGame.Setup;
 
 internal static class BootstrapChecks
 {
+    [DllImport("kernel32.dll", EntryPoint = "CreateFileW", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern SafeFileHandle OpenDirectory(string path, uint access, uint share,
+        IntPtr security, uint creation, uint flags, IntPtr template);
+
     public static void Run()
     {
         static void Check(bool condition, string message)
@@ -69,6 +76,37 @@ internal static class BootstrapChecks
         BootstrapRunner.Install(release, installation, CancellationToken.None);
         Check(File.ReadAllText(Path.Combine(installation, "DogGame.exe")) == "updated build", "Update was not installed.");
         Check(File.ReadAllText(Path.Combine(installation, "display.ini")) == "user settings", "Update discarded settings.");
+        using (SafeFileHandle heldDirectory = OpenDirectory(installation, 0, 3, IntPtr.Zero, 3, 0x02000000, IntPtr.Zero))
+        {
+            Check(!heldDirectory.IsInvalid, "Could not reproduce an installation directory held open without delete sharing.");
+            File.WriteAllText(Path.Combine(release, "DogGame.exe"), "open-directory update");
+            BootstrapRunner.Install(release, installation, CancellationToken.None);
+            Check(File.ReadAllText(Path.Combine(installation, "DogGame.exe")) == "open-directory update",
+                "A directory-only sharing lock must not prevent installation.");
+            Check(File.ReadAllText(Path.Combine(installation, "display.ini")) == "user settings",
+                "Open-directory installation discarded settings.");
+            string lockedName = "z-locked.bin";
+            File.WriteAllText(Path.Combine(installation, lockedName), "original data");
+            File.WriteAllText(Path.Combine(release, lockedName), "replacement data");
+            File.WriteAllText(Path.Combine(release, "DogGame.exe"), "must roll back");
+            using (var heldFile = new FileStream(Path.Combine(installation, lockedName), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                try
+                {
+                    BootstrapRunner.Install(release, installation, CancellationToken.None);
+                    throw new InvalidOperationException("A locked destination file unexpectedly allowed installation.");
+                }
+                catch (IOException)
+                {
+                    Check(File.ReadAllText(Path.Combine(installation, "DogGame.exe")) == "open-directory update",
+                        "A file lock must restore earlier replacements.");
+                }
+            }
+            Check(File.ReadAllText(Path.Combine(installation, lockedName)) == "original data", "Locked original data was lost.");
+            File.Delete(Path.Combine(release, lockedName));
+        }
+        File.WriteAllText(Path.Combine(release, "DogGame.exe"), "updated build");
+        BootstrapRunner.Install(release, installation, CancellationToken.None);
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         try

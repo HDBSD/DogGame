@@ -7,6 +7,7 @@
 #include <share.h>
 #include "debug_options.h"
 #include "xbox/renderer_options.h"
+#include "api/title_renderer_settings.h"
 /* Publish options only after every argument has passed validation. */
 TitleOptions title_options;
 static const char *usage = "DogGame.exe [--nofmv] [--noaudio] [--debug [options]]\n\n"
@@ -19,7 +20,8 @@ static const char *usage = "DogGame.exe [--nofmv] [--noaudio] [--debug [options]
                            "--trace                Trace the first rendered frame; requires --debug\n"
                            "--profiler             Capture a 10-second renderer profile; requires --debug\n"
                            "--fpsgraph             Show frame timing graph; requires --debug\n"
-                           "--vulkan               Experimental Vulkan renderer; requires --debug\n"
+                           "--vulkan               Use Vulkan (overrides the saved renderer)\n"
+                           "--dx11                 Use DirectX 11 (overrides the saved renderer)\n"
                            "--help                 Show this help\n\n"
                            "Pause, then select Debug with F1 or controller Back.\n";
 
@@ -32,6 +34,7 @@ uint32_t title_level_id(const char *name)
 int title_options_parse(int argc, const wchar_t *const *argv, char *error, unsigned capacity)
 {
     TitleOptions options = {0};
+    options.vulkan = 1;
 #ifdef PREVIEW_VULKAN_FPSGRAPH
     /* This preview ships with the experimental renderer and timing graph.
      * The graph uses debug controls, including its in-game toggle. */
@@ -77,7 +80,12 @@ int title_options_parse(int argc, const wchar_t *const *argv, char *error, unsig
         else if (!wcscmp(argument, L"--vulkan"))
         {
             options.vulkan = 1;
-            requires_debug = 1;
+            options.renderer_override = 1;
+        }
+        else if (!wcscmp(argument, L"--dx11"))
+        {
+            options.vulkan = 0;
+            options.renderer_override = 1;
         }
         else if (!wcscmp(argument, L"--level"))
         {
@@ -187,13 +195,18 @@ int title_options_init(void)
         _putenv_s("RECOMP_PROFILE_GPU", "1");
         DeleteFileA("debug-frame.trigger");
     }
-    /* Explicit experimental policy lives here; the backend owns device setup.
-     * Refuse startup if requested Vulkan is unavailable rather than quietly
-     * reporting a successful Vulkan run while drawing through D3D11. */
+    /* Select once before any device resources are created. The menu saves a
+     * next-launch preference; it cannot migrate live backend resources. */
+    if (!title_options.renderer_override)
+    {
+        title_options.vulkan = title_renderer_settings_prefer_vulkan();
+    }
     if (title_options.vulkan && !xbox_SelectExperimentalVulkan(error, sizeof error))
     {
         fprintf(stderr, "[VULKAN] %s\n", error);
-        MessageBoxA(NULL, error, "DogGame: Vulkan unavailable", MB_OK | MB_ICONERROR);
+        char message[768];
+        snprintf(message, sizeof message, "%s\n\nLaunch DogGame with --dx11 to use DirectX 11 instead.", error);
+        MessageBoxA(NULL, message, "DogGame: Vulkan unavailable", MB_OK | MB_ICONERROR);
         return -1;
     }
     if (title_options.noaudio)
